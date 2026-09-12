@@ -145,3 +145,59 @@ build_epub("sample_dd.epub", seekable=False)
 # 長書：測試章節切段
 long_txt = "\n\n".join("第 %d 段落。%s" % (i, "測試內容補字。" * 40) for i in range(1, 150))
 write("long.txt", ("第一章　長章節\n\n" + long_txt).encode("utf-8"))
+
+
+# 目錄型中文 txt：開頭一份目錄，之後才是正文（實際電子書常見）
+chs = [("一", "初到"), ("二", "風波"), ("三", "轉機"), ("四", "結局")]
+lines = ["紅樓一夢", "", "目錄", ""]
+lines += ["第%s章\u3000%s" % (n, t2) for n, t2 in chs]
+lines += [""]
+for n, t2 in chs:
+    lines.append("第%s章\u3000%s" % (n, t2))
+    lines.append("")
+    lines.append("這是第%s章的正文。" % n + "內容補字。" * 30)
+    lines.append("")
+write("toc_style.txt", "\n".join(lines).encode("utf-8"))
+
+
+# 正文直接掛在 div 底下、用 <br> 分段的 epub（實際書店檔案常見；只有章名包在 h3）
+BR_CH1 = """<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>c1</title></head><body>
+<div> <h3>第一章</h3><br /><br /> 天色已晚，主人鎖了大門。<br /><br /> 第二段正文在這裡。<br /><br /> 第三段正文也要抓到。</div>
+</body></html>"""
+
+BR_TOC = """<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>toc</title></head><body>
+<div> 第一章<br />第二章</div>
+</body></html>"""
+
+BR_OPF = """<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="bid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>散落文字測試</dc:title><dc:creator>測試作者</dc:creator>
+    <dc:language>zh-TW</dc:language><dc:identifier id="bid">urn:uuid:br-1</dc:identifier>
+  </metadata>
+  <manifest>
+    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+    <item id="t" href="toc.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c1" href="1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine toc="ncx"><itemref idref="t"/><itemref idref="c1"/></spine>
+</package>"""
+
+BR_NCX = """<?xml version="1.0" encoding="utf-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><navMap>
+  <navPoint id="n1"><navLabel><text>目錄</text></navLabel><content src="toc.xhtml"/></navPoint>
+  <navPoint id="n2"><navLabel><text>第一章</text></navLabel><content src="1.xhtml"/></navPoint>
+</navMap></ncx>"""
+
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, "w") as z:
+    z.writestr(zipfile.ZipInfo("mimetype"), "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+    z.writestr("META-INF/container.xml",
+               CONTAINER.replace("OEBPS/content.opf", "OEBPS/content.opf"), compress_type=zipfile.ZIP_DEFLATED)
+    z.writestr("OEBPS/content.opf", BR_OPF, compress_type=zipfile.ZIP_DEFLATED)
+    z.writestr("OEBPS/toc.ncx", BR_NCX, compress_type=zipfile.ZIP_DEFLATED)
+    z.writestr("OEBPS/toc.xhtml", BR_TOC, compress_type=zipfile.ZIP_DEFLATED)
+    z.writestr("OEBPS/1.xhtml", BR_CH1, compress_type=zipfile.ZIP_DEFLATED)
+write("brdiv.epub", buf.getvalue())

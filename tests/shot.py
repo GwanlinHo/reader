@@ -118,18 +118,26 @@ async def main():
             await send("Page.enable")
             await asyncio.sleep(1.5)
 
-            print(await js(IMPORT_JS % ("long.txt", "long.txt", "text/plain")))
-            print(await js(IMPORT_JS % ("sample.epub", "sample.epub", "application/epub+zip")))
+            extra = os.environ.get("SHOT_BOOK", "")
+            if extra:
+                print(await js(IMPORT_JS % (extra, extra, "application/epub+zip")))
+            else:
+                print(await js(IMPORT_JS % ("long.txt", "long.txt", "text/plain")))
+                print(await js(IMPORT_JS % ("sample.epub", "sample.epub", "application/epub+zip")))
             await asyncio.sleep(0.5)
             await shot("shelf.png")
 
-            print(await js(OPEN_JS % "測試書名"))
+            print(await js(OPEN_JS % os.environ.get("SHOT_OPEN1", "測試書名")))
             await asyncio.sleep(0.8)
             await shot("read_epub.png")
 
-            print(await js(OPEN_JS % "long"))
+            print(await js(OPEN_JS % os.environ.get("SHOT_OPEN2", "long")))
             await asyncio.sleep(0.8)
-            await js("document.getElementById('content').scrollTop = 900;")
+            for _ in range(int(os.environ.get("SHOT_PAGES", "0"))):
+                await js("document.getElementById('next-page-btn').click();")
+                await asyncio.sleep(0.8)
+            if not os.environ.get("SHOT_PAGES"):
+                await js("document.getElementById('content').scrollTop = 900;")
             await asyncio.sleep(0.4)
             await shot("read_txt.png")
 

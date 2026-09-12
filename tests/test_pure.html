@@ -147,6 +147,31 @@
   jobs.push(checkEpub("sample_ncx.epub", "NCX 卷一"));
   jobs.push(checkEpub("sample_dd.epub", "卷一　開端"));
 
+  /* 正文直接放在 div 底下、用 <br> 分段（只有章名包在 h3）的 epub：
+     舊版只走子元素，會把整章正文漏掉，只剩章名，看起來就是「只有目錄沒有內容」。 */
+  jobs.push(get("fixtures/brdiv.epub").then(function (b) {
+    return parse.parseFile("brdiv.epub", b);
+  }).then(function (r) {
+    var doc = r.doc;
+    var text = doc.blocks.map(function (x) { return x.t; }).join("\n");
+    ok(text.indexOf("天色已晚") >= 0, "br 分段的正文有抓到");
+    ok(text.indexOf("第三段正文也要抓到") >= 0, "最後一段正文也有抓到");
+    ok(doc.blocks.filter(function (x) { return x.k === "p" && x.t.length > 5; }).length >= 3,
+       "正文切成多個段落（實得 " + doc.blocks.filter(function (x) { return x.k === "p"; }).length + "）");
+    ok(doc.blocks.some(function (x) { return x.k === "h" && x.t === "第一章"; }), "章名仍是標題區塊");
+    ok(doc.totalChars > 30, "字數不只章名");
+  }));
+
+  /* 目錄型 txt：開頭那份目錄不該變成一堆幾乎空白的章節 */
+  jobs.push(get("fixtures/toc_style.txt").then(function (b) {
+    var doc = parse.txtToDoc(parse.decodeBuffer(b).text, { title: "toc" });
+    eq(doc.chapters.length, 4, "目錄行不會各自變成一章");
+    ok(/第一章/.test(doc.chapters[0].title), "第一章就是第一個章節");
+    var n = 0;
+    for (var i = doc.chapters[0].start; i < doc.chapters[0].end; i++) n += doc.blocks[i].t.length;
+    ok(n > 150, "開書第一個畫面就有正文（" + n + " 字）");
+  }));
+
   jobs.push(get("fixtures/sample_utf8.txt").then(function (b) {
     return parse.parseFile("x.epub", b).then(function () {
       ok(false, "非 zip 檔要報錯");

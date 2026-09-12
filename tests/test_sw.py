@@ -63,13 +63,18 @@ async def main():
             # 等預先快取寫完（頁面可能還停在 about:blank，要重試）
             cached = None
             for _ in range(60):
-                cached = await js("""caches.open('reader-v1').then(function(c){
-                    return c.keys().then(function(k){ return k.map(function(x){return new URL(x.url).pathname;}); });
+                # 快取名稱會隨 sw.js 版本變動，直接找 reader- 開頭的那一個
+                cached = await js("""caches.keys().then(function(names){
+                    var n = names.filter(function(x){ return x.indexOf('reader-') === 0; })[0];
+                    if (!n) return null;
+                    return caches.open(n).then(function(c){
+                      return c.keys().then(function(k){ return k.map(function(x){return new URL(x.url).pathname;}); });
+                    });
                 })""")
                 if isinstance(cached, list) and len(cached) >= 10:
                     break
                 await asyncio.sleep(0.5)
-            ok(isinstance(cached, list), "reader-v1 快取存在", cached)
+            ok(isinstance(cached, list), "預先快取存在", cached)
             reg = None
             for _ in range(20):
                 reg = await js("(navigator.serviceWorker ? navigator.serviceWorker.ready.then(function(r){return !!r.active;}) : Promise.resolve('no-api'))")

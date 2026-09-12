@@ -158,7 +158,7 @@ input[type="file"] { position: absolute; width: 1px; height: 1px; opacity: 0; po
   line-height: var(--read-line);
   outline: none;
 }
-.content .blk { margin: 0 0 0.85em; white-space: pre-wrap; text-align: justify; }
+.content .blk { margin: 0 0 0.85em; white-space: pre-wrap; text-align: justify; overflow-wrap: break-word; }
 .content .blk.p { text-indent: 1.6em; }
 .content .blk.h {
   text-indent: 0;

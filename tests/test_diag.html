@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head><meta charset="UTF-8"><title>閱讀者：單檔診斷</title></head>
+<body>
+<pre id="log">RUN</pre>
+<script src="../segment.js"></script><script src="../zip.js"></script><script src="../parse.js"></script>
+<script>
+/* 用法：把要檢查的書放進 tests/fixtures/，開
+   http://127.0.0.1:PORT/tests/test_diag.html?f=書檔名
+   會印出章節切法與前幾個區塊，方便判斷「只看到目錄沒有內容」這類解析問題。 */
+(function () {
+  var name = (location.search.match(/[?&]f=([^&]+)/) || [])[1];
+  name = name ? decodeURIComponent(name) : "sample.epub";
+  var log = document.getElementById("log");
+  fetch("fixtures/" + name).then(function (r) { return r.arrayBuffer(); })
+    .then(function (b) { return RD.parse.parseFile(name, b); })
+    .then(function (r) {
+      var doc = r.doc, out = [];
+      out.push("檔案=" + name + " 格式=" + r.format + " 編碼=" + r.encoding);
+      out.push("書名=" + doc.title + " 作者=" + doc.author);
+      out.push("blocks=" + doc.blocks.length + " chapters=" + doc.chapters.length + " 總字數=" + doc.totalChars);
+      doc.chapters.forEach(function (c, i) {
+        var n = 0, body = 0;
+        for (var j = c.start; j < c.end; j++) {
+          n += doc.blocks[j].t.length;
+          if (doc.blocks[j].k !== "h") body += doc.blocks[j].t.length;
+        }
+        out.push("[" + i + "] " + c.title + "  blocks=" + (c.end - c.start) + " chars=" + n + " 正文=" + body);
+      });
+      var ch = doc.chapters[Math.min(1, doc.chapters.length - 1)];
+      out.push("--- 第 " + (doc.chapters.indexOf(ch) + 1) + " 章前 6 個區塊 ---");
+      for (var j = ch.start; j < Math.min(ch.end, ch.start + 6); j++) {
+        out.push(j + " (" + doc.blocks[j].k + ") " + doc.blocks[j].t.slice(0, 40));
+      }
+      log.textContent = out.join("\n") + "\nDONE";
+    })
+    .catch(function (e) { log.textContent = "ERR " + (e && e.message) + "\nDONE"; });
+})();
+</script>
+</body>
+</html>

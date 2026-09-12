@@ -139,7 +139,49 @@
     return out;
   }
 
+  /* 只有一兩行的「章節」要併進後面那一章。
+     很多中文 txt 開頭就是一份目錄（連續好幾行「第 N 章 …」），每一行都被當成標題，
+     不處理的話開書會停在幾乎空白的畫面上，看起來就是「只有目錄沒有內容」。
+     epub 的封面頁、獻辭頁同理。 */
+  /* 判斷「幾乎沒有正文」用的是標題以外的字數：目錄頁、只有一行章名的區段
+     正文字數趨近於零，真正很短的章節（詩、語錄）則不會被誤併。 */
+  var MIN_BODY = 40;
+
+  function chapBodyChars(blocks, ch) {
+    var n = 0;
+    for (var i = ch.start; i < ch.end; i++) {
+      if (blocks[i].k !== "h") n += blocks[i].t.length;
+    }
+    return n;
+  }
+
+  function cleanTitle(t) {
+    var first = String(t || "").split("\n")[0].replace(/^[\s\u3000]+/, "").replace(/[\s\u3000]+$/, "");
+    return first.length > 40 ? first.slice(0, 40) : first;
+  }
+
+  function mergeTiny(blocks, chapters) {
+    var out = [];
+    chapters.forEach(function (ch) {
+      var cur = out[out.length - 1];
+      if (cur && chapBodyChars(blocks, cur) < MIN_BODY) {
+        cur.end = ch.end;
+        /* 併進來的那一章比較有份量，就用它的名字 */
+        cur.title = cleanTitle(ch.title) || cur.title;
+        return;
+      }
+      out.push({ title: cleanTitle(ch.title), start: ch.start, end: ch.end });
+    });
+    /* 最後一章太短就併回前一章 */
+    if (out.length > 1 && chapBodyChars(blocks, out[out.length - 1]) < MIN_BODY) {
+      var last = out.pop();
+      out[out.length - 1].end = last.end;
+    }
+    return out;
+  }
+
   function finishDoc(blocks, chapters, meta) {
+    chapters = mergeTiny(blocks, chapters);
     chapters = splitOversized(blocks, chapters).filter(function (c) { return c.end > c.start; });
     var total = 0;
     blocks.forEach(function (b) { total += b.t.length; });
@@ -205,15 +247,21 @@
 
   function walk(el, out) {
     if (hasBlockChild(el)) {
-      for (var i = 0; i < el.children.length; i++) {
-        var c = el.children[i];
-        if (BLOCK_TAGS[tagOf(c)]) {
-          walk(c, out);
-        } else {
-          var t0 = cleanText(c.textContent);
-          if (t0) out.push({ k: "p", t: t0, el: c });
+      /* 有些 epub 把正文直接放在 div 底下、用 <br> 分段（只有章名包在 h3 裡）。
+         只走子元素會把整章正文漏掉，所以夾在區塊之間的散落文字也要收進來。 */
+      var buf = "";
+      var nodes = el.childNodes;
+      for (var i = 0; i < nodes.length; i++) {
+        var n = nodes[i];
+        if (n.nodeType === 1 && BLOCK_TAGS[tagOf(n)]) {
+          flushLoose(buf, el, out);
+          buf = "";
+          walk(n, out);
+        } else if (n.nodeType === 1 || n.nodeType === 3) {
+          buf += n.nodeType === 3 ? (n.nodeValue || "") : n.textContent;
         }
       }
+      flushLoose(buf, el, out);
       return;
     }
     var t = cleanText(el.textContent);
@@ -285,6 +333,17 @@
     });
     out.sort(function (a, b) { return a.index - b.index; });
     return out;
+  }
+
+  /* 散落文字依換行（原本的 <br>）切成段落，讓每段都能正常縮排與朗讀 */
+  function flushLoose(text, owner, out) {
+    var t = cleanText(text);
+    if (!t) return;
+    t.split("\n").forEach(function (line) {
+      var s2 = cleanText(line);
+      if (!s2) return;
+      out.push({ k: looksHeading(s2) ? "h" : "p", t: s2, el: owner });
+    });
   }
 
   function parseXml(text) {

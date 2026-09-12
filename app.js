@@ -528,11 +528,20 @@
 
   /* ---------- 翻頁 ---------- */
 
+  /* 內容區底部留了一大段空白給朗讀自動捲動用，判斷「這一章讀完了」要看章末標記，
+     不能用 scrollHeight，否則短章節會先翻到一片空白。 */
+  function atChapterEnd() {
+    var c = el.content;
+    var mark = c.querySelector(".chap-end");
+    if (!mark) return c.scrollTop + c.clientHeight >= c.scrollHeight - 4;
+    return mark.getBoundingClientRect().bottom <= c.getBoundingClientRect().bottom + 4;
+  }
+
   function pageBy(dir) {
     var c = el.content;
     var step = Math.max(120, c.clientHeight - PAGE_OVERLAP);
     if (dir > 0) {
-      if (c.scrollTop + c.clientHeight >= c.scrollHeight - 4) { goChapter(cur.chapter + 1, false); return; }
+      if (atChapterEnd()) { goChapter(cur.chapter + 1, false); return; }
       smoothScrollBy(step);
     } else {
       if (c.scrollTop <= 2) { goChapter(cur.chapter - 1, true); return; }
