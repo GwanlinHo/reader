@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head><meta charset="UTF-8"><title>閱讀者：端到端測試</title>
+<style>
+  body { font: 13px/1.6 monospace; margin: 0; }
+  #log { white-space: pre-wrap; padding: 8px; }
+  iframe { width: 420px; height: 640px; border: 1px solid #ccc; }
+</style>
+</head>
+<body>
+<pre id="log">RUNNING</pre>
+<iframe id="app"></iframe>
+<script>
+(function () {
+  var lines = [], pass = 0, fail = 0;
+  var logEl = document.getElementById("log");
+
+  function flush(tag) {
+    logEl.textContent = lines.join("\n") + "\n" + tag + " PASS=" + pass + " FAIL=" + fail;
+  }
+  function ok(cond, name, extra) {
+    if (cond) { pass++; lines.push("[O] " + name); }
+    else { fail++; lines.push("[X] " + name + (extra !== undefined ? "  << " + extra : "")); }
+    flush("PARTIAL");
+  }
+  function eq(a, b, name) { ok(a === b, name, JSON.stringify(a) + " != " + JSON.stringify(b)); }
+  function info(m) { lines.push("    " + m); flush("PARTIAL"); }
+
+  function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  function until(fn, label, timeout) {
+    timeout = timeout || 15000;
+    var t0 = Date.now();
+    return new Promise(function (resolve, reject) {
+      (function tick() {
+        var v;
+        try { v = fn(); } catch (e) { v = null; }
+        if (v) { resolve(v); return; }
+        if (Date.now() - t0 > timeout) { reject(new Error("等不到：" + label)); return; }
+        setTimeout(tick, 30);
+      })();
+    });
+  }
+
+  /* ---------- 準備乾淨環境 ---------- */
+
+  function wipe() {
+    try { localStorage.removeItem("reader-settings-v1"); } catch (e) { /* 忽略 */ }
+    return new Promise(function (resolve) {
+      var req = indexedDB.deleteDatabase("reader-db");
+      req.onsuccess = req.onerror = req.onblocked = function () { resolve(); };
+      setTimeout(resolve, 2000);
+    });
+  }
+
+  var frame = document.getElementById("app");
+
+  function loadApp() {
+    return new Promise(function (resolve) {
+      frame.onload = function () { resolve(frame.contentWindow); };
+      frame.src = "../index.html?test=1";
+    }).then(function (win) {
+      return until(function () { return win.RD && win.RD.db && win.document.getElementById("shelf-list") ? win : null; }, "app 載入").then(function () { return win; });
+    });
+  }
+
+  function reloadApp() {
+    return new Promise(function (resolve) {
+      frame.onload = function () { resolve(frame.contentWindow); };
+      frame.contentWindow.location.reload();
+    }).then(function (win) {
+      return until(function () { return win.RD && win.RD.db ? win : null; }, "app 重新載入").then(function () { return win; });
+    });
+  }
+
+  /* ---------- 語音替身 ---------- */
+
+  function installSpeechStub(win) {
+    var spoken = [];
+    function Utter(text) {
+      this.text = text; this.lang = ""; this.voice = null;
+      this.rate = 1; this.pitch = 1; this.volume = 1;
+      this.onend = null; this.onerror = null;
+    }
+    var synth = {
+      speaking: false,
+      paused: false,
+      pending: false,
+      getVoices: function () { return []; },
+      speak: function (u) {
+        spoken.push({ text: u.text, lang: u.lang });
+        setTimeout(function () { if (u.onend) u.onend({}); }, 1);
+      },
+      cancel: function () { },
+      pause: function () { },
+      resume: function () { },
+      addEventListener: function () { },
+      onvoiceschanged: null
+    };
+    /* speechSynthesis 是唯讀 getter，必須用 defineProperty 才蓋得過去 */
+    Object.defineProperty(win, "speechSynthesis", { configurable: true, value: synth });
+    Object.defineProperty(win, "SpeechSynthesisUtterance", { configurable: true, value: Utter });
+    return spoken;
+  }
+
+  /* ---------- 匯入檔案 ---------- */
+
+  function importFixture(win, name, type) {
+    return fetch("fixtures/" + name).then(function (r) { return r.arrayBuffer(); }).then(function (buf) {
+      var doc = win.document;
+      var input = doc.getElementById("file-input");
+      var file = new win.File([new Uint8Array(buf)], name, { type: type || "text/plain" });
+      var dt = new win.DataTransfer();
+      dt.items.add(file);
+      input.files = dt.files;
+      input.dispatchEvent(new win.Event("change"));
+      return until(function () {
+        return /已匯入/.test(doc.getElementById("import-status").textContent) ? true : null;
+      }, "匯入完成 " + name);
+    });
+  }
+
+  function readBook(win, cb) {
+    return new Promise(function (resolve, reject) {
+      var req = win.indexedDB.open("reader-db");
+      req.onsuccess = function () {
+        var db = req.result;
+        var t = db.transaction(["books"], "readonly");
+        var g = t.objectStore("books").getAll();
+        g.onsuccess = function () { resolve(cb ? cb(g.result) : g.result); };
+        g.onerror = function () { reject(g.error); };
+      };
+      req.onerror = function () { reject(req.error); };
+    });
+  }
+
+  /* ---------- 測試流程 ---------- */
+
+  var win, spoken;
+
+  wipe().then(loadApp).then(function (w) {
+    win = w;
+    var doc = win.document;
+    ok(!doc.getElementById("shelf-empty").classList.contains("hidden"), "一開始書架是空的");
+    return importFixture(win, "long.txt");
+  }).then(function () {
+    var doc = win.document;
+    return until(function () { return doc.querySelectorAll("#shelf-list li").length === 1 ? true : null; }, "書架出現一本書");
+  }).then(function () {
+    var doc = win.document;
+    var li = doc.querySelector("#shelf-list li");
+    ok(/long/.test(li.textContent), "書名取自檔名");
+    ok(/txt/.test(li.textContent), "格式標記為 txt");
+    /* 重複匯入同一個檔案不該變成兩本 */
+    return importFixture(win, "long.txt").then(function () {
+      return until(function () { return doc.querySelectorAll("#shelf-list li").length === 1 ? true : null; }, "重複匯入不增加書本", 5000);
+    }).then(function () {
+      ok(true, "同一檔案重複匯入仍是一本（以內容雜湊為 id）");
+    });
+  }).then(function () {
+    return importFixture(win, "sample.epub", "application/epub+zip");
+  }).then(function () {
+    var doc = win.document;
+    return until(function () { return doc.querySelectorAll("#shelf-list li").length === 2 ? true : null; }, "書架兩本書");
+  }).then(function () {
+    var doc = win.document;
+    ok(true, "epub 匯入成功");
+    /* 開啟 txt 這本 */
+    var items = Array.prototype.slice.call(doc.querySelectorAll("#shelf-list li"));
+    var target = items.filter(function (li) { return /long/.test(li.textContent); })[0];
+    target.querySelector(".b-main").click();
+    return until(function () {
+      return !doc.getElementById("view-read").classList.contains("hidden") &&
+        doc.getElementById("read-title").textContent === "long" &&
+        doc.querySelectorAll("#content .blk").length > 0 ? true : null;
+    }, "進入閱讀畫面");
+  }).then(function () {
+    var doc = win.document;
+    eq(doc.getElementById("read-title").textContent, "long", "閱讀畫面顯示書名");
+    ok(/第一章/.test(doc.getElementById("read-chapter").textContent), "章節名稱是第一章");
+    ok(doc.querySelectorAll("#content .s").length >= 4, "內容被切成多個句子 span");
+    ok(doc.querySelectorAll("#toc-list li").length >= 3, "長書切成多個渲染單位並列在目錄（" + doc.querySelectorAll("#toc-list li").length + "）");
+
+    /* 捲動 → 進度應該寫回資料庫 */
+    var c = doc.getElementById("content");
+    ok(c.scrollHeight > c.clientHeight * 2, "長書內容夠長，可以真的捲動");
+    info("content offsetParent=" + (c.offsetParent ? c.offsetParent.id || c.offsetParent.tagName : "null") +
+         " clientHeight=" + c.clientHeight + " scrollHeight=" + c.scrollHeight);
+    c.scrollTop = Math.floor(c.scrollHeight * 0.45);
+    c.dispatchEvent(new win.Event("scroll"));
+    /* 存檔有節流（最長 2.5 秒），等久一點再讀資料庫 */
+    return wait(3200).then(function () {
+      return readBook(win, function (books) {
+        return books.filter(function (b) { return b.title === "long"; })[0];
+      });
+    });
+  }).then(function (bk) {
+    ok(bk && bk.percent > 0, "捲動後有存進度", bk && bk.percent);
+    ok(bk && bk.anchor && typeof bk.anchor.b === "number", "進度是用區塊錨點存的", JSON.stringify(bk && bk.anchor));
+    info("存下的錨點 " + JSON.stringify(bk.anchor) + " percent=" + bk.percent.toFixed(3));
+    window.__savedAnchor = bk.anchor;
+
+    /* 加註解 */
+    var doc = win.document;
+    doc.getElementById("add-annot-btn").click();
+    return until(function () {
+      return !doc.getElementById("sheet-annot-edit").classList.contains("hidden") ? true : null;
+    }, "註解編輯面板打開");
+  }).then(function () {
+    var doc = win.document;
+    ok(/「/.test(doc.getElementById("annot-quote").textContent), "註解自動帶入引文");
+    doc.getElementById("annot-text").value = "這是測試註解";
+    doc.getElementById("annot-save").click();
+    return until(function () {
+      return doc.getElementById("sheet-annot-edit").classList.contains("hidden") ? true : null;
+    }, "註解儲存後關閉面板");
+  }).then(function () {
+    var doc = win.document;
+    doc.getElementById("annots-btn").click();
+    return until(function () { return doc.querySelectorAll("#annot-list li").length === 1 ? true : null; }, "註解清單有一則");
+  }).then(function () {
+    var doc = win.document;
+    var li = doc.querySelector("#annot-list li");
+    ok(/這是測試註解/.test(li.textContent), "註解內容正確");
+    ok(doc.querySelectorAll("#content .s.noted").length >= 1, "有註解的句子有底線標記");
+    /* 跳頁 */
+    var jump = Array.prototype.slice.call(li.querySelectorAll("button")).filter(function (b) { return /跳到/.test(b.textContent); })[0];
+    jump.click();
+    return until(function () { return doc.getElementById("sheet-annots").classList.contains("hidden") ? true : null; }, "跳頁後關閉註解清單");
+  }).then(function () {
+    ok(true, "註解跳頁可用");
+    /* 重新載入：應該自動開回同一本書、同一個位置 */
+    return reloadApp();
+  }).then(function (w) {
+    win = w;
+    var doc = win.document;
+    return until(function () {
+      return !doc.getElementById("view-read").classList.contains("hidden") &&
+        doc.querySelectorAll("#content .blk").length > 0 ? true : null;
+    }, "重新載入後自動開回上次那本書");
+  }).then(function () {
+    var doc = win.document;
+    eq(doc.getElementById("read-title").textContent, "long", "自動開回同一本書");
+    var c = doc.getElementById("content");
+    /* 找出畫面最上方那一句，應該與存下的錨點相同或非常接近 */
+    var spans = Array.prototype.slice.call(doc.querySelectorAll("#content .s"));
+    var cr = c.getBoundingClientRect();
+    var top = spans.filter(function (s) { return s.getBoundingClientRect().bottom > cr.top + 10; })[0];
+    var a = window.__savedAnchor;
+    ok(!!top, "重新載入後畫面上有句子");
+    if (top) {
+      var b = +top.getAttribute("data-b"), o = +top.getAttribute("data-o");
+      info("回復後最上方 " + JSON.stringify({ b: b, o: o }) + " 對照存檔 " + JSON.stringify(a));
+      /* 句子是行內 span，同一行可能有前一句的尾巴，所以只要求同一區塊、
+         且存檔那一句就在畫面最上緣附近（不是被捲到畫面外）。 */
+      eq(b, a.b, "回到同一個區塊");
+      var saved = doc.querySelector('#content .s[data-b="' + a.b + '"][data-o="' + a.o + '"]');
+      ok(!!saved, "存檔那一句有渲染出來");
+      if (saved) {
+        var dy = saved.getBoundingClientRect().top - cr.top;
+        info("存檔那一句距離畫面上緣 " + Math.round(dy) + "px");
+        ok(dy > -60 && dy < 80, "存檔那一句就在畫面最上緣", Math.round(dy) + "px");
+      }
+    }
+    ok(doc.querySelectorAll("#content .s.noted").length >= 1, "註解標記在重新載入後仍在");
+
+    /* 翻頁 */
+    c.scrollTop = 0;
+    var before = c.scrollTop;
+    doc.getElementById("next-page-btn").click();
+    return wait(800).then(function () {
+      ok(c.scrollTop > before + 100, "下一頁會往下捲", c.scrollTop + " vs " + before);
+      var mid = c.scrollTop;
+      doc.getElementById("prev-page-btn").click();
+      return wait(800).then(function () {
+        ok(c.scrollTop < mid, "上一頁會往上捲", c.scrollTop + " vs " + mid);
+        /* 調字級不能弄丟位置 */
+        function topAnchor() {
+          var cr = c.getBoundingClientRect();
+          var sp = Array.prototype.slice.call(doc.querySelectorAll("#content .s"))
+            .filter(function (s) { return s.getBoundingClientRect().bottom > cr.top + 10; })[0];
+          return sp ? sp.getAttribute("data-b") + ":" + sp.getAttribute("data-o") : "";
+        }
+        c.scrollTop = Math.floor(c.scrollHeight * 0.3);
+        c.dispatchEvent(new win.Event("scroll"));
+        var a0 = topAnchor();
+        var btns = doc.querySelectorAll("#font-group .seg-btn");
+        btns[btns.length - 1].click();
+        return wait(300).then(function () {
+          var a1 = topAnchor();
+          info("字級調整前後最上方句子：" + a0 + " -> " + a1);
+          /* 句子是行內 span，同一行常有前一句的尾巴，所以檢查原本那一句
+             是否仍貼在畫面上緣（不是被整段捲走） */
+          var sel = '#content .s[data-b="' + a0.split(":")[0] + '"][data-o="' + a0.split(":")[1] + '"]';
+          var target = doc.querySelector(sel);
+          ok(!!target, "調字級後原本那一句仍在畫面上");
+          if (target) {
+            var dy = target.getBoundingClientRect().top - c.getBoundingClientRect().top;
+            info("原本那一句距離上緣 " + Math.round(dy) + "px");
+            ok(dy > -60 && dy < 80, "調字級後仍停在同一句", Math.round(dy) + "px");
+          }
+          btns[2].click();
+          return wait(200);
+        });
+      });
+    });
+  }).then(function () {
+    /* 朗讀：換成 epub（有中英夾雜的章節） */
+    var doc = win.document;
+    doc.getElementById("back-btn").click();
+    return until(function () { return doc.querySelectorAll("#shelf-list li").length === 2 ? true : null; }, "回到書架");
+  }).then(function () {
+    var doc = win.document;
+    var items = Array.prototype.slice.call(doc.querySelectorAll("#shelf-list li"));
+    var target = items.filter(function (li) { return /測試書名/.test(li.textContent); })[0];
+    ok(!!target, "epub 書名取自 OPF metadata");
+    target.querySelector(".b-main").click();
+    return until(function () {
+      return doc.getElementById("read-title").textContent === "測試書名" &&
+        doc.querySelectorAll("#content .blk").length > 0 ? true : null;
+    }, "開啟 epub");
+  }).then(function () {
+    var doc = win.document;
+    ok(/卷一/.test(doc.getElementById("read-chapter").textContent), "epub 章節名稱來自目錄");
+    spoken = installSpeechStub(win);
+    doc.getElementById("play-btn").click();
+    return until(function () { return spoken.length >= 6 ? true : null; }, "朗讀開始並持續推進", 20000);
+  }).then(function () {
+    var doc = win.document;
+    ok(spoken.length >= 6, "朗讀有連續送出多段（" + spoken.length + " 段）");
+    var texts = spoken.map(function (s) { return s.text; });
+    var joined = texts.join(" | ");
+    info("前八段：" + texts.slice(0, 8).join(" / "));
+    ok(!/[。，、！？：；「」『』（）]/.test(joined), "送進 TTS 的文字沒有中文標點");
+    ok(texts.every(function (t) { return t.trim().length > 0; }), "沒有送出空字串");
+    ok(doc.querySelectorAll("#content .s.on").length <= 1, "同時只有一句是高亮");
+    return until(function () { return spoken.some(function (s) { return /PWA/.test(s.text); }) ? true : null; }, "朗讀自動跨到第二章", 25000);
+  }).then(function () {
+    ok(true, "朗讀跑完一章會自動接下一章");
+    /* 等英文那一句真的唸到，再檢查語言分派 */
+    return until(function () {
+      return spoken.some(function (s) { return /quick brown fox/.test(s.text); }) ? true : null;
+    }, "唸到夾在中文段落裡的英文長句", 25000);
+  }).then(function () {
+    var langs = {};
+    spoken.forEach(function (s) { langs[(s.lang || "").slice(0, 2)] = true; });
+    info("出現的語言標記：" + Object.keys(langs).join(","));
+    ok(langs.zh, "中文段落用 zh 語音");
+    ok(langs.en, "英文段落用 en 語音");
+    var en = spoken.filter(function (s) { return (s.lang || "").indexOf("en") === 0; });
+    ok(en.some(function (s) { return /quick brown fox/.test(s.text); }), "長英文句子整段交給英文語音");
+    ok(!spoken.some(function (s) { return (s.lang || "").indexOf("en") === 0 && /[㐀-鿿]/.test(s.text); }), "英文語音段落裡沒有夾中文字");
+    var zhWithPwa = spoken.filter(function (s) { return /PWA/.test(s.text) && (s.lang || "").indexOf("zh") === 0; });
+    ok(zhWithPwa.length >= 1, "夾在中文句中的短英文詞留給中文語音");
+
+    /* 停止 */
+    var doc = win.document;
+    var n = spoken.length;
+    win.RD.speech.stop();
+    return wait(400).then(function () {
+      var n2 = spoken.length;
+      return wait(400).then(function () {
+        ok(spoken.length === n2, "停止後不再送出新段落（停止時 " + n + "，之後 " + spoken.length + "）");
+        eq(doc.querySelectorAll("#content .s.on").length, 0, "停止後清掉高亮");
+      });
+    });
+  }).then(function () {
+    /* 刪除書本 */
+    var doc = win.document;
+    doc.getElementById("back-btn").click();
+    return until(function () { return doc.querySelectorAll("#shelf-list li").length === 2 ? true : null; }, "回到書架（刪除前）");
+  }).then(function () {
+    var doc = win.document;
+    win.confirm = function () { return true; };
+    var items = Array.prototype.slice.call(doc.querySelectorAll("#shelf-list li"));
+    var target = items.filter(function (li) { return /測試書名/.test(li.textContent); })[0];
+    Array.prototype.slice.call(target.querySelectorAll("button")).filter(function (b) { return /選單/.test(b.textContent); })[0].click();
+    return until(function () { return !doc.getElementById("sheet-book").classList.contains("hidden") ? true : null; }, "書本選單打開");
+  }).then(function () {
+    var doc = win.document;
+    doc.getElementById("book-delete").click();
+    return until(function () { return doc.querySelectorAll("#shelf-list li").length === 1 ? true : null; }, "刪除後只剩一本");
+  }).then(function () {
+    ok(true, "刪除書本可用");
+    return readBook(win, function (books) { return books.length; });
+  }).then(function (n) {
+    eq(n, 1, "資料庫裡也只剩一本");
+    flush("DONE");
+  }).catch(function (e) {
+    fail++;
+    lines.push("[X] 測試中斷：" + (e && e.message ? e.message : e));
+    if (e && e.stack) lines.push(String(e.stack).split("\n").slice(0, 4).join("\n"));
+    flush("DONE");
+  });
+
+  flush("PARTIAL");
+})();
+</script>
+</body>
+</html>

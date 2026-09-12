@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head><meta charset="UTF-8"><title>閱讀者：真實電子書測試</title></head>
+<body>
+<pre id="log">RUNNING</pre>
+<script src="../segment.js"></script>
+<script src="../zip.js"></script>
+<script src="../parse.js"></script>
+<script>
+(function () {
+  var lines = [], pass = 0, fail = 0;
+  function ok(c, name, extra) {
+    if (c) { pass++; lines.push("[O] " + name); }
+    else { fail++; lines.push("[X] " + name + (extra !== undefined ? "  << " + extra : "")); }
+  }
+  function info(m) { lines.push("    " + m); }
+  function flush(tag) {
+    document.getElementById("log").textContent = lines.join("\n") + "\n" + tag + " PASS=" + pass + " FAIL=" + fail;
+  }
+  function get(p) {
+    return fetch(p).then(function (r) { if (!r.ok) throw new Error("抓不到 " + p); return r.arrayBuffer(); });
+  }
+
+  function check(name, file, expectTitle, minChars) {
+    return get("fixtures/" + file).then(function (buf) {
+      var t0 = performance.now();
+      return RD.parse.parseFile(file, buf).then(function (r) {
+        var ms = Math.round(performance.now() - t0);
+        var doc = r.doc;
+        info(name + "：解析 " + Math.round(buf.byteLength / 1024) + " KB 用 " + ms + " ms，" +
+             doc.chapters.length + " 個渲染單位，" + doc.blocks.length + " 個區塊，" +
+             doc.totalChars + " 字");
+        ok(ms < 8000, name + "：解析時間可接受（" + ms + " ms）");
+        ok(new RegExp(expectTitle).test(doc.title), name + "：書名 " + doc.title);
+        ok(doc.chapters.length >= 5, name + "：章節數合理（" + doc.chapters.length + "）");
+        ok(doc.totalChars > minChars, name + "：字數合理（" + doc.totalChars + "）");
+        var text = doc.blocks.map(function (b) { return b.t; }).join("\n");
+        ok(text.indexOf("<p") < 0 && text.indexOf("</") < 0, name + "：沒有殘留 HTML 標籤");
+        ok(text.indexOf("font-family") < 0, name + "：沒有混進 CSS");
+        var headings = doc.blocks.filter(function (b) { return b.k === "h"; }).length;
+        info(name + "：標題區塊 " + headings + " 個；前三個章節名：" +
+             doc.chapters.slice(0, 3).map(function (c) { return c.title; }).join(" / "));
+        info(name + "：第 6-11 個章節名：" +
+             doc.chapters.slice(5, 11).map(function (c) { return c.title; }).join(" / "));
+        var longs = doc.blocks.filter(function (b) { return b.k === "p" && b.t.length > 120; });
+        var mid = longs[Math.floor(longs.length / 2)] || doc.blocks[0];
+        if (mid) {
+          var sents = RD.seg.splitSentences(mid.t);
+          ok(sents.every(function (s) { return mid.t.substr(s.o, s.t.length) === s.t; }), name + "：句子位移對得上");
+          ok(sents.length >= 1 && sents.every(function (s) { return s.t.length <= 180; }), name + "：句子長度受控");
+          info(name + "：樣本句 → " + sents.slice(0, 3).map(function (s) {
+            return "[" + RD.seg.langRuns(s.t).map(function (x) { return x.lang; }).join("+") + "] " +
+                   RD.seg.stripSpeechPunctuation(s.t).slice(0, 40);
+          }).join(" | "));
+          var runs = [];
+          sents.slice(0, 6).forEach(function (s) {
+            RD.seg.langRuns(s.t).forEach(function (x) { runs.push(x); });
+          });
+          ok(runs.every(function (x) { return x.t.trim().length > 0; }), name + "：語音片段沒有空白段");
+        }
+        return doc;
+      });
+    });
+  }
+
+  Promise.resolve()
+    .then(function () { return check("英文書", "real_en.epub", "Pride and Prejudice", 400000); })
+    .then(function (doc) {
+      var runs = [];
+      doc.blocks.slice(40, 120).forEach(function (b) {
+        RD.seg.splitSentences(b.t).forEach(function (s) {
+          RD.seg.langRuns(s.t).forEach(function (r) { runs.push(r); });
+        });
+      });
+      var en = runs.filter(function (r) { return r.lang === "en"; }).length;
+      info("英文書片段：en " + en + " / 全部 " + runs.length);
+      ok(runs.length > 0 && en === runs.length, "英文書全部片段都判成英文");
+    })
+    .then(function () { return check("中文書", "real_zh.epub", "紅樓夢", 300000); })
+    .then(function (doc) {
+      var runs = [];
+      doc.blocks.slice(50, 250).forEach(function (b) {
+        RD.seg.splitSentences(b.t).forEach(function (s) {
+          RD.seg.langRuns(s.t).forEach(function (r) { runs.push(r); });
+        });
+      });
+      var zh = runs.filter(function (r) { return r.lang === "zh"; }).length;
+      info("中文書片段：zh " + zh + " / 全部 " + runs.length);
+      ok(runs.length > 0 && zh / runs.length > 0.95, "中文書幾乎都判成中文");
+    })
+    .then(function () { flush("DONE"); })
+    .catch(function (e) {
+      fail++;
+      lines.push("[X] 中斷：" + (e && e.message ? e.message : e));
+      flush("DONE");
+    });
+  flush("PARTIAL");
+})();
+</script>
+</body>
+</html>

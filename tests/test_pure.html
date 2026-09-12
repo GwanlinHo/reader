@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head><meta charset="UTF-8"><title>閱讀者：純函式測試</title></head>
+<body>
+<pre id="log">RUNNING</pre>
+<script src="../segment.js"></script>
+<script src="../zip.js"></script>
+<script src="../parse.js"></script>
+<script>
+(function () {
+  var lines = [], pass = 0, fail = 0;
+  function ok(cond, name, extra) {
+    if (cond) { pass++; lines.push("[O] " + name); }
+    else { fail++; lines.push("[X] " + name + (extra !== undefined ? "  << " + extra : "")); }
+  }
+  function eq(a, b, name) { ok(a === b, name, JSON.stringify(a) + " != " + JSON.stringify(b)); }
+  function flush(tag) {
+    document.getElementById("log").textContent =
+      lines.join("\n") + "\n" + tag + " PASS=" + pass + " FAIL=" + fail;
+  }
+  function get(path) {
+    return fetch(path).then(function (r) {
+      if (!r.ok) throw new Error("抓不到 " + path);
+      return r.arrayBuffer();
+    });
+  }
+
+  var seg = RD.seg, parse = RD.parse;
+
+  /* ---------- 斷句 ---------- */
+  var t1 = "這是第一句。第二句！第三句？";
+  var s1 = seg.splitSentences(t1);
+  eq(s1.length, 3, "中文三句斷成三段");
+  ok(s1.every(function (s) { return t1.substr(s.o, s.t.length) === s.t; }), "句子位移對得上原文");
+  eq(s1.map(function (s) { return s.t; }).join(""), t1, "句子接回來等於原文");
+
+  eq(seg.splitSentences("價格是 3.14 元，時間 12:30 開始。").length, 1, "小數點不斷句");
+  var sEn = seg.splitSentences("Mr. Smith said hello. It was 3.5 miles away.");
+  eq(sEn.length, 2, "英文縮寫 Mr. 不斷句");
+  eq(sEn[0].t.trim(), "Mr. Smith said hello.", "英文第一句完整");
+  eq(seg.splitSentences("J. R. R. Tolkien wrote it. Then he rested.").length, 2, "姓名縮寫不斷句");
+  eq(seg.splitSentences("他說：「走吧。」然後離開。").length, 2, "收尾引號跟著上一句");
+  ok(seg.splitSentences("沒有標點的一行").length === 1, "沒有標點也算一句");
+  var longNo = new Array(600).join("字");
+  ok(seg.splitSentences(longNo).length > 1, "超長無標點會硬切");
+  ok(seg.splitSentences(longNo).every(function (s) { return s.t.length <= 180; }), "硬切後每段不超過 180 字");
+
+  /* ---------- 中英分段 ---------- */
+  var r1 = seg.langRuns("這個 PWA 很好用。");
+  eq(r1.length, 1, "短英文詞不換語音");
+  eq(r1[0].lang, "zh", "整句留給中文語音");
+
+  var r2 = seg.langRuns("他說 The quick brown fox jumps over the lazy dog every morning. 然後笑了。");
+  ok(r2.length >= 2, "長英文片段獨立成段");
+  ok(r2.some(function (r) { return r.lang === "en" && /quick brown fox/.test(r.t); }), "英文片段標成 en");
+  ok(r2.some(function (r) { return r.lang === "zh" && /他說/.test(r.t); }), "中文片段標成 zh");
+  ok(r2.every(function (r) { return "他說 The quick brown fox jumps over the lazy dog every morning. 然後笑了。".substr(r.o, r.t.length) === r.t; }), "片段位移對得上句子");
+
+  var r3 = seg.langRuns("Call me Ishmael.");
+  eq(r3.length, 1, "純英文一段");
+  eq(r3[0].lang, "en", "純英文標成 en");
+
+  /* ---------- 朗讀前清洗 ---------- */
+  var c1 = seg.stripSpeechPunctuation("他說：「這個 PWA 很好用。」");
+  ok(c1.indexOf("：") < 0 && c1.indexOf("「") < 0 && c1.indexOf("。") < 0, "全形標點被清掉");
+  ok(/他說/.test(c1) && /PWA/.test(c1), "文字本身保留");
+  eq(seg.stripSpeechPunctuation("價格 3.14 元"), "價格 3.14 元", "數字間的小數點保留");
+  eq(seg.stripSpeechPunctuation("don't stop"), "don't stop", "英文撇號保留");
+  eq(seg.stripSpeechPunctuation("well-known case."), "well-known case", "詞內連字號保留、句點清掉");
+  eq(seg.stripSpeechPunctuation("50% of $20"), "50% of $20", "百分比與金額符號保留");
+
+  /* ---------- 編碼與 txt ---------- */
+  var jobs = [];
+
+  jobs.push(get("fixtures/sample_utf8.txt").then(function (b) {
+    var r = parse.decodeBuffer(b);
+    eq(r.encoding, "utf-8", "UTF-8 偵測");
+    ok(r.text.indexOf("第一章") === 0, "UTF-8 內容正確");
+    var doc = parse.txtToDoc(r.text, { title: "t" });
+    eq(doc.chapters.length, 2, "txt 依標題分成兩章");
+    ok(/第一章/.test(doc.chapters[0].title), "第一章標題");
+    ok(/第二章/.test(doc.chapters[1].title), "第二章標題");
+    eq(doc.blocks[0].k, "h", "章節標題是 h 區塊");
+    ok(doc.totalChars > 50, "總字數合理");
+    /* 錨點位移必須能在區塊文字中對上 */
+    var b0 = doc.blocks[2];
+    var ss = seg.splitSentences(b0.t);
+    ok(ss.every(function (s) { return b0.t.substr(s.o, s.t.length) === s.t; }), "區塊內句子位移正確");
+  }));
+
+  jobs.push(get("fixtures/sample_utf8_bom.txt").then(function (b) {
+    var r = parse.decodeBuffer(b);
+    eq(r.encoding, "utf-8", "BOM 也判成 UTF-8");
+    ok(r.text.charCodeAt(0) !== 0xfeff, "BOM 被移除");
+    ok(parse.normalize(r.text).indexOf("第一章") === 0, "BOM 後內容正確");
+  }));
+
+  jobs.push(get("fixtures/sample_big5.txt").then(function (b) {
+    var r = parse.decodeBuffer(b);
+    eq(r.encoding, "big5", "Big5 偵測");
+    ok(r.text.indexOf("第一章") === 0, "Big5 解碼正確");
+    ok(r.text.indexOf("�") < 0, "Big5 沒有亂碼");
+  }));
+
+  jobs.push(get("fixtures/sample_gb.txt").then(function (b) {
+    var r = parse.decodeBuffer(b);
+    ok(r.encoding === "gb18030" || r.encoding === "big5", "簡體檔有挑到中文編碼（實得 " + r.encoding + "）");
+  }));
+
+  jobs.push(get("fixtures/long.txt").then(function (b) {
+    var doc = parse.txtToDoc(parse.decodeBuffer(b).text, { title: "long" });
+    ok(doc.chapters.length >= 3, "長章節被切成多個渲染單位（" + doc.chapters.length + "）");
+    ok(doc.chapters.some(function (c) { return /續/.test(c.title); }), "續段標題有標記");
+    var okLen = doc.chapters.every(function (c) {
+      var n = 0;
+      for (var i = c.start; i < c.end; i++) n += doc.blocks[i].t.length;
+      return n <= parse.MAX_CHAP + 2000;
+    });
+    ok(okLen, "每個渲染單位不會爆量");
+    var covered = doc.chapters.reduce(function (acc, c) { return acc + (c.end - c.start); }, 0);
+    eq(covered, doc.blocks.length, "章節切割沒有漏掉區塊");
+  }));
+
+  /* ---------- epub ---------- */
+  function checkEpub(name, expectFirstTitle) {
+    return get("fixtures/" + name).then(function (b) {
+      return parse.parseFile(name, b);
+    }).then(function (r) {
+      var doc = r.doc;
+      eq(doc.title, "測試書名", name + "：書名");
+      eq(doc.author, "測試作者", name + "：作者");
+      eq(doc.chapters.length, 2, name + "：兩章（linear=no 被排除）");
+      eq(doc.chapters[0].title, expectFirstTitle, name + "：目錄標題");
+      var text = doc.blocks.map(function (x) { return x.t; }).join("\n");
+      ok(text.indexOf("不應該出現") < 0, name + "：linear=no 內容沒被收進來");
+      ok(text.indexOf("var x = 1") < 0, name + "：script 內容被移除");
+      ok(text.indexOf("巢狀段落也要抓到") >= 0, name + "：巢狀段落有抓到");
+      ok(text.indexOf("清單項目一") >= 0, name + "：清單項目有抓到");
+      ok(doc.blocks.some(function (x) { return x.k === "q" && /引文/.test(x.t); }), name + "：blockquote 標成 q");
+      ok(doc.blocks.some(function (x) { return /詩句一\n詩句二/.test(x.t); }), name + "：br 轉成換行");
+      ok(doc.blocks.some(function (x) { return x.k === "h" && /卷一/.test(x.t); }), name + "：標題是 h 區塊");
+      return doc;
+    });
+  }
+
+  jobs.push(checkEpub("sample.epub", "卷一　開端"));
+  jobs.push(checkEpub("sample_ncx.epub", "NCX 卷一"));
+  jobs.push(checkEpub("sample_dd.epub", "卷一　開端"));
+
+  jobs.push(get("fixtures/sample_utf8.txt").then(function (b) {
+    return parse.parseFile("x.epub", b).then(function () {
+      ok(false, "非 zip 檔要報錯");
+    }, function (e) {
+      ok(/zip|epub/.test(e.message), "非 zip 檔會給明確錯誤：" + e.message);
+    });
+  }));
+
+  jobs.push(Promise.resolve(RD.zip.supported()).then(function (s) {
+    ok(s === true, "本瀏覽器支援 DecompressionStream deflate-raw");
+  }));
+
+  Promise.all(jobs).then(function () {
+    flush("DONE");
+  }).catch(function (e) {
+    fail++;
+    lines.push("[X] 測試中斷：" + (e && e.message ? e.message : e) + (e && e.stack ? "\n" + e.stack : ""));
+    flush("DONE");
+  });
+  flush("PARTIAL");
+})();
+</script>
+</body>
+</html>

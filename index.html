@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#f6f3ec">
+<title>閱讀者</title>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="閱讀者">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<video id="wake-video" class="wake-video" muted playsinline loop preload="auto" aria-hidden="true"></video>
+
+<!-- ========== 書架 ========== -->
+<section id="view-shelf" class="view">
+  <header class="top">
+    <h1>閱讀者</h1>
+    <div class="top-actions">
+      <label class="btn primary" for="file-input">匯入書籍</label>
+      <input id="file-input" type="file" multiple accept=".txt,.epub,text/plain,application/epub+zip">
+      <button id="shelf-settings-btn" class="btn">設定</button>
+      <button id="about-btn" class="btn">說明</button>
+    </div>
+  </header>
+  <p id="import-status" class="note" role="status"></p>
+  <ul id="shelf-list" class="shelf"></ul>
+  <div id="shelf-empty" class="empty">
+    <p>書架是空的。</p>
+    <p>按「匯入書籍」選 txt 或 epub 檔。檔案會複製一份到本機儲存空間，之後每次開啟都會自動接續上次讀到的位置，不必再選檔。</p>
+    <p class="small">書檔、進度與註解全部只留在這台裝置上，不會上傳。</p>
+  </div>
+  <p id="storage-note" class="note small"></p>
+</section>
+
+<!-- ========== 閱讀 ========== -->
+<section id="view-read" class="view hidden">
+  <header id="read-top" class="top read-bar">
+    <button id="back-btn" class="btn ghost" aria-label="回書架">返回</button>
+    <button id="toc-btn" class="chapter-btn">
+      <span id="read-title" class="read-title">書名</span>
+      <span id="read-chapter" class="read-chapter">章節</span>
+    </button>
+    <button id="annots-btn" class="btn ghost">註解</button>
+    <button id="settings-btn" class="btn ghost">設定</button>
+  </header>
+
+  <main id="content" class="content" tabindex="-1"></main>
+
+  <footer id="read-bottom" class="bottom read-bar">
+    <button id="play-btn" class="btn primary">朗讀</button>
+    <button id="add-annot-btn" class="btn">加註解</button>
+    <button id="prev-page-btn" class="btn ghost" aria-label="上一頁">上一頁</button>
+    <button id="next-page-btn" class="btn ghost" aria-label="下一頁">下一頁</button>
+    <span id="progress-label" class="progress-label"></span>
+  </footer>
+  <p id="status" class="status" role="status"></p>
+</section>
+
+<!-- ========== 目錄 ========== -->
+<div id="sheet-toc" class="sheet hidden">
+  <div class="sheet-box">
+    <div class="sheet-head"><h2>目錄</h2><button class="close-btn" data-close="sheet-toc">關閉</button></div>
+    <ul id="toc-list" class="toc-list"></ul>
+  </div>
+</div>
+
+<!-- ========== 註解列表 ========== -->
+<div id="sheet-annots" class="sheet hidden">
+  <div class="sheet-box">
+    <div class="sheet-head"><h2>註解</h2><button class="close-btn" data-close="sheet-annots">關閉</button></div>
+    <ul id="annot-list" class="annot-list"></ul>
+    <p id="annot-empty" class="note">這本書還沒有註解。在閱讀畫面選取一段文字後按「加註解」，或直接按「加註解」把註解掛在畫面最上方那一句。</p>
+  </div>
+</div>
+
+<!-- ========== 註解編輯 ========== -->
+<div id="sheet-annot-edit" class="sheet hidden">
+  <div class="sheet-box">
+    <div class="sheet-head"><h2 id="annot-edit-title">新增註解</h2><button class="close-btn" data-close="sheet-annot-edit">關閉</button></div>
+    <p id="annot-quote" class="quote"></p>
+    <textarea id="annot-text" rows="6" placeholder="寫下你的想法"></textarea>
+    <div class="sheet-actions">
+      <button id="annot-save" class="btn primary">儲存</button>
+      <button id="annot-delete" class="btn danger">刪除</button>
+    </div>
+  </div>
+</div>
+
+<!-- ========== 設定 ========== -->
+<div id="sheet-settings" class="sheet hidden">
+  <div class="sheet-box">
+    <div class="sheet-head"><h2>設定</h2><button class="close-btn" data-close="sheet-settings">關閉</button></div>
+
+    <h3>閱讀</h3>
+    <div class="field"><label>字級</label><div id="font-group" class="seg"></div></div>
+    <div class="field"><label>行距</label><div id="line-group" class="seg"></div></div>
+    <div class="field"><label>字體</label><div id="family-group" class="seg"></div></div>
+    <div class="field"><label>配色</label><div id="theme-group" class="seg"></div></div>
+    <label class="switch"><input id="edge-tap" type="checkbox" checked> 點畫面左右邊緣翻頁</label>
+
+    <h3>朗讀</h3>
+    <div class="field">
+      <label for="rate-range">速度 <span id="rate-val" class="val"></span></label>
+      <input id="rate-range" type="range" min="0.6" max="1.6" step="0.05">
+    </div>
+    <div class="field"><label for="voice-zh">中文語音</label><select id="voice-zh"></select></div>
+    <div class="field"><label for="voice-en">英文語音</label><select id="voice-en"></select></div>
+    <p id="voice-note" class="note"></p>
+    <label class="switch"><input id="keep-awake" type="checkbox" checked> 朗讀時保持螢幕常亮</label>
+    <p id="wake-note" class="note"></p>
+    <div class="sheet-actions"><button id="voice-test" class="btn">試聽中英混合</button></div>
+
+    <h3>資料</h3>
+    <p id="storage-detail" class="note"></p>
+    <div class="sheet-actions">
+      <button id="export-btn" class="btn">匯出進度與註解</button>
+      <label class="btn" for="import-json">匯入備份</label>
+      <input id="import-json" type="file" accept=".json,application/json">
+    </div>
+  </div>
+</div>
+
+<!-- ========== 書本選單 ========== -->
+<div id="sheet-book" class="sheet hidden">
+  <div class="sheet-box">
+    <div class="sheet-head"><h2 id="book-menu-title">書本</h2><button class="close-btn" data-close="sheet-book">關閉</button></div>
+    <div class="sheet-actions column">
+      <button id="book-open" class="btn primary">開始閱讀</button>
+      <button id="book-finish" class="btn">標記為讀畢</button>
+      <button id="book-restart" class="btn">從頭開始</button>
+      <button id="book-delete" class="btn danger">刪除這本書</button>
+    </div>
+    <p id="book-menu-info" class="note"></p>
+  </div>
+</div>
+
+<!-- ========== 說明 ========== -->
+<div id="sheet-about" class="sheet hidden">
+  <div class="sheet-box">
+    <div class="sheet-head"><h2>說明</h2><button class="close-btn" data-close="sheet-about">關閉</button></div>
+    <p>閱讀者是一個純本機的電子書閱讀器，支援 txt 與 epub。</p>
+    <ul class="bullets">
+      <li>匯入時會把檔案複製到本機儲存空間，之後開啟不必再選檔，自動回到上次讀的位置。</li>
+      <li>翻頁：點畫面左右邊緣，或用下方按鈕；也可以直接捲動。點畫面中央可隱藏／顯示工具列。</li>
+      <li>朗讀會自動翻頁，中英夾雜會自動換語音。朗讀時螢幕保持常亮。</li>
+      <li>限制：瀏覽器在背景或鎖屏時會暫停語音，這是網頁的限制，無法繞過。請讓畫面保持開啟。</li>
+      <li>註解：選取文字後按「加註解」，或直接按「加註解」掛在畫面最上方那一句。在「註解」清單可瀏覽、編輯與跳頁。</li>
+      <li>所有資料只存在這台裝置，不會上傳。清除瀏覽器資料會一併清掉書與註解，建議偶爾用「匯出進度與註解」留一份備份。</li>
+    </ul>
+    <p class="small">PDF 尚未支援，之後會加上純檢視模式。</p>
+  </div>
+</div>
+
+<script src="segment.js"></script>
+<script src="zip.js"></script>
+<script src="parse.js"></script>
+<script src="db.js"></script>
+<script src="speech.js"></script>
+<script src="app.js"></script>
+<script>
+if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
+  window.addEventListener("load", function () {
+    navigator.serviceWorker.register("sw.js").catch(function () { /* 離線功能不可用不影響閱讀 */ });
+  });
+}
+</script>
+</body>
+</html>
