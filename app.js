@@ -292,7 +292,13 @@
               percent: 0,
               annotCount: 0
             };
-            return RD.db.putDoc({ id: id, blocks: doc.blocks, chapters: doc.chapters, totalChars: doc.totalChars })
+            return RD.db.putDoc({
+              id: id,
+              blocks: doc.blocks,
+              chapters: doc.chapters,
+              totalChars: doc.totalChars,
+              parserVersion: RD.parse.VERSION
+            })
               .then(function () { return RD.db.putFile({ id: id, name: file.name, buf: buf }); })
               .then(function () { return RD.db.putBook(book); });
           });
@@ -309,6 +315,8 @@
     return RD.db.getBook(id).then(function (bk) {
       if (!bk) { setStatus("找不到這本書"); return; }
       return RD.db.getDoc(id).then(function (doc) {
+        return upgradeDoc(bk, doc);
+      }).then(function (doc) {
         if (!doc || !doc.blocks || !doc.blocks.length) {
           setStatus("這本書的內容遺失，請重新匯入");
           return;
@@ -330,6 +338,97 @@
         });
       });
     });
+  }
+
+  /* ---------- 解析器升級：自動重新解析 ---------- */
+
+  /* 解析邏輯修好之後（例如某類 epub 原本抓不到正文），已經匯入的書還留著舊結果。
+     這裡在開書時偵測版本差異，用原始檔重新解析，並把閱讀位置與註解接回去。 */
+  function upgradeDoc(bk, doc) {
+    var needed = !doc || !doc.blocks || !doc.blocks.length || doc.parserVersion !== RD.parse.VERSION;
+    if (!needed) return Promise.resolve(doc);
+    return RD.db.getFile(bk.id).then(function (rec) {
+      if (!rec || !rec.buf) return doc;       /* 沒有原始檔就沿用舊的 */
+      setStatus("正在用新版重新解析這本書…", 0);
+      return RD.parse.parseFile(rec.name || bk.fileName || "book", rec.buf).then(function (r) {
+        var nd = r.doc;
+        var newDoc = {
+          id: bk.id,
+          blocks: nd.blocks,
+          chapters: nd.chapters,
+          totalChars: nd.totalChars,
+          parserVersion: RD.parse.VERSION
+        };
+        return remapAfterReparse(bk, doc, newDoc).then(function () {
+          return RD.db.putDoc(newDoc);
+        }).then(function () {
+          setStatus("已用新版重新解析");
+          return newDoc;
+        });
+      }).catch(function (e) {
+        setStatus("重新解析失敗，沿用原本的內容（" + (e && e.message ? e.message : "未知錯誤") + "）");
+        return doc;
+      });
+    });
+  }
+
+  /* 區塊索引會因為重新解析而改變：閱讀位置用百分比對回去，
+     註解優先用引文原文重新定位，找不到才退回百分比。 */
+  function remapAfterReparse(bk, oldDoc, newDoc) {
+    var oldPrefix = oldDoc && oldDoc.blocks ? buildPrefix(oldDoc.blocks) : null;
+    var oldTotal = (oldDoc && oldDoc.totalChars) || 0;
+
+    function oldPercentOf(a) {
+      if (!oldPrefix || !oldTotal || !a || typeof a.b !== "number") return 0;
+      var b = Math.max(0, Math.min(oldPrefix.length - 2, a.b));
+      return ((oldPrefix[b] || 0) + (a.o || 0)) / oldTotal;
+    }
+
+    bk.anchor = anchorAtPercent(newDoc, bk.anchor ? oldPercentOf(bk.anchor) : (bk.percent || 0));
+    bk.totalChars = newDoc.totalChars;
+    bk.chapterCount = newDoc.chapters.length;
+
+    return RD.db.annotsOf(bk.id).then(function (list) {
+      var chain = RD.db.putBook(bk);
+      list.forEach(function (a) {
+        var hit = findQuote(newDoc, a.quote);
+        var na = hit || anchorAtPercent(newDoc, oldPercentOf(a));
+        if (na.b === a.b && na.o === a.o) return;
+        a.b = na.b;
+        a.o = na.o;
+        chain = chain.then(function () { return RD.db.putAnnot(a); });
+      });
+      return chain;
+    });
+  }
+
+  function anchorAtPercent(doc, percent) {
+    var target = Math.max(0, Math.min(1, percent || 0)) * (doc.totalChars || 0);
+    var acc = 0;
+    for (var i = 0; i < doc.blocks.length; i++) {
+      var len = doc.blocks[i].t.length;
+      if (acc + len > target) return { b: i, o: Math.max(0, Math.floor(target - acc)) };
+      acc += len;
+    }
+    return { b: Math.max(0, doc.blocks.length - 1), o: 0 };
+  }
+
+  /* 用註解當初存下的引文找回位置；引文可能被重新斷行，取前段比對即可 */
+  function findQuote(doc, quote) {
+    var q = String(quote || "").replace(/\s+/g, "").slice(0, 24);
+    if (q.length < 4) return null;
+    for (var i = 0; i < doc.blocks.length; i++) {
+      var plain = doc.blocks[i].t.replace(/\s+/g, "");
+      var at = plain.indexOf(q);
+      if (at < 0) continue;
+      /* 位移要換算回原始文字（含空白）的座標 */
+      var seen = 0, j = 0, raw = doc.blocks[i].t;
+      for (; j < raw.length && seen < at; j++) {
+        if (!/\s/.test(raw[j])) seen++;
+      }
+      return { b: i, o: j };
+    }
+    return null;
   }
 
   function buildPrefix(blocks) {

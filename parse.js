@@ -575,6 +575,9 @@
   }
 
   RD.parse = {
+    /* 解析邏輯有實質改變就 +1：開書時發現存下來的版本比較舊，
+       會自動用原始檔重新解析一次，使用者不必刪書重匯。 */
+    VERSION: 2,
     decodeBuffer: decodeBuffer,
     normalize: normalize,
     txtToDoc: txtToDoc,

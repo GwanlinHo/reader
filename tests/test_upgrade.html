@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head><meta charset="UTF-8"><title>閱讀者：解析器升級測試</title>
+<style>body{font:13px/1.6 monospace;margin:0}#log{white-space:pre-wrap;padding:8px}iframe{width:420px;height:640px;border:1px solid #ccc}</style>
+</head>
+<body>
+<pre id="log">RUNNING</pre>
+<iframe id="app"></iframe>
+<script>
+/* 情境：使用者的書是用舊版解析器匯入的（例如整章正文被漏掉），
+   之後解析器修好了，開書時應該自動用原始檔重新解析，
+   並且把閱讀位置與註解接回去。 */
+(function () {
+  var lines = [], pass = 0, fail = 0;
+  var logEl = document.getElementById("log");
+  function flush(tag) { logEl.textContent = lines.join("\n") + "\n" + tag + " PASS=" + pass + " FAIL=" + fail; }
+  function ok(c, name, extra) {
+    if (c) { pass++; lines.push("[O] " + name); }
+    else { fail++; lines.push("[X] " + name + (extra !== undefined ? "  << " + extra : "")); }
+    flush("PARTIAL");
+  }
+  function info(m) { lines.push("    " + m); flush("PARTIAL"); }
+  function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function until(fn, label, timeout) {
+    timeout = timeout || 20000;
+    var t0 = Date.now();
+    return new Promise(function (resolve, reject) {
+      (function tick() {
+        var v = null;
+        try { v = fn(); } catch (e) { v = null; }
+        if (v) { resolve(v); return; }
+        if (Date.now() - t0 > timeout) { reject(new Error("等不到：" + label)); return; }
+        setTimeout(tick, 40);
+      })();
+    });
+  }
+
+  var frame = document.getElementById("app");
+  function loadApp(src) {
+    return new Promise(function (resolve) {
+      frame.onload = function () { resolve(frame.contentWindow); };
+      if (src) frame.src = src; else frame.contentWindow.location.reload();
+    }).then(function (win) {
+      return until(function () { return win.RD && win.RD.db ? win : null; }, "app 載入");
+    });
+  }
+
+  function idb(win, stores, mode, fn) {
+    return new Promise(function (resolve, reject) {
+      var req = win.indexedDB.open("reader-db");
+      req.onsuccess = function () {
+        var t = req.result.transaction(stores, mode);
+        var r = fn(t);
+        r.onsuccess = function () { resolve(r.result); };
+        r.onerror = function () { reject(r.error); };
+      };
+      req.onerror = function () { reject(req.error); };
+    });
+  }
+
+  function wipe() {
+    return new Promise(function (resolve) {
+      try { localStorage.removeItem("reader-settings-v1"); } catch (e) { /* 忽略 */ }
+      var req = indexedDB.deleteDatabase("reader-db");
+      req.onsuccess = req.onerror = req.onblocked = function () { resolve(); };
+      setTimeout(resolve, 2000);
+    });
+  }
+
+  function importFixture(win, name, type) {
+    return fetch("fixtures/" + name).then(function (r) { return r.arrayBuffer(); }).then(function (buf) {
+      var doc = win.document;
+      var input = doc.getElementById("file-input");
+      var dt = new win.DataTransfer();
+      dt.items.add(new win.File([new Uint8Array(buf)], name, { type: type }));
+      input.files = dt.files;
+      input.dispatchEvent(new win.Event("change"));
+      return until(function () {
+        return /已匯入/.test(doc.getElementById("import-status").textContent) ? true : null;
+      }, "匯入 " + name);
+    });
+  }
+
+  var win, bookId, quote = "";
+
+  wipe().then(function () { return loadApp("../index.html?upgrade=1"); }).then(function (w) {
+    win = w;
+    return importFixture(win, "brdiv.epub", "application/epub+zip");
+  }).then(function () {
+    var doc = win.document;
+    return until(function () { return doc.querySelector("#shelf-list li") ? true : null; }, "書架出現書");
+  }).then(function () {
+    var doc = win.document;
+    doc.querySelector("#shelf-list .b-main").click();
+    return until(function () { return doc.querySelectorAll("#content .blk").length > 2 ? true : null; }, "開書");
+  }).then(function () {
+    var doc = win.document;
+    /* 加一則註解，等一下要檢查它有沒有被接回去 */
+    doc.getElementById("add-annot-btn").click();
+    return until(function () {
+      return !doc.getElementById("sheet-annot-edit").classList.contains("hidden") ? true : null;
+    }, "註解面板");
+  }).then(function () {
+    var doc = win.document;
+    quote = doc.getElementById("annot-quote").textContent.replace(/[「」]/g, "").trim();
+    doc.getElementById("annot-text").value = "升級測試註解";
+    doc.getElementById("annot-save").click();
+    return wait(800);
+  }).then(function () {
+    return idb(win, ["books"], "readonly", function (t) { return t.objectStore("books").getAll(); });
+  }).then(function (books) {
+    bookId = books[0].id;
+    info("引文：" + quote.slice(0, 20));
+    /* 把資料庫改成「舊版解析器的結果」：版本號退回 1，內容只剩章名 */
+    return new Promise(function (resolve, reject) {
+      var req = win.indexedDB.open("reader-db");
+      req.onsuccess = function () {
+        var t = req.result.transaction(["docs"], "readwrite");
+        var st = t.objectStore("docs");
+        var g = st.get(bookId);
+        g.onsuccess = function () {
+          var d = g.result;
+          d.parserVersion = 1;
+          d.blocks = [{ k: "h", t: "第一章" }];
+          d.chapters = [{ title: "第一章", start: 0, end: 1 }];
+          d.totalChars = 3;
+          st.put(d);
+        };
+        t.oncomplete = function () { resolve(); };      /* 一定要等交易真的完成 */
+        t.onerror = function () { reject(t.error); };
+      };
+      req.onerror = function () { reject(req.error); };
+    });
+  }).then(function () {
+    return idb(win, ["docs"], "readonly", function (t) { return t.objectStore("docs").get(bookId); });
+  }).then(function (d) {
+    ok(d.blocks.length === 1, "已模擬成舊版解析結果（只剩章名）");
+    return loadApp();
+  }).then(function (w) {
+    win = w;
+    var doc = win.document;
+    return until(function () {
+      return doc.querySelectorAll("#content .blk").length > 2 ? true : null;
+    }, "重新開書後內容變回完整", 25000);
+  }).then(function () {
+    var doc = win.document;
+    var text = doc.getElementById("content").textContent;
+    ok(/天色已晚/.test(text), "自動重新解析後看得到正文");
+    ok(doc.querySelectorAll("#content .blk").length >= 4, "段落數恢復（" + doc.querySelectorAll("#content .blk").length + "）");
+    return idb(win, ["docs"], "readonly", function (t) { return t.objectStore("docs").get(bookId); });
+  }).then(function (d) {
+    ok(d.parserVersion === win.RD.parse.VERSION, "資料庫記下新的解析器版本", d.parserVersion);
+    ok(d.blocks.length >= 4, "資料庫內容已更新", d.blocks.length);
+    return idb(win, ["annots"], "readonly", function (t) { return t.objectStore("annots").getAll(); });
+  }).then(function (list) {
+    ok(list.length === 1, "註解還在");
+    return idb(win, ["docs"], "readonly", function (t) { return t.objectStore("docs").get(bookId); })
+      .then(function (d) {
+        var a = list[0];
+        var blk = d.blocks[a.b];
+        info("註解錨點 " + JSON.stringify({ b: a.b, o: a.o }) + " → " + (blk ? blk.t.slice(0, 20) : "（超出範圍）"));
+        ok(!!blk, "註解錨點落在有效區塊");
+        var q = String(a.quote || "").replace(/\s+/g, "").slice(0, 10);
+        ok(!!blk && (blk.t.replace(/\s+/g, "").indexOf(q) >= 0 || q.length < 4), "註解用引文重新定位回原文");
+      });
+  }).then(function () {
+    return idb(win, ["books"], "readonly", function (t) { return t.objectStore("books").getAll(); });
+  }).then(function (books) {
+    var bk = books[0];
+    ok(bk.totalChars > 20, "書目字數已更新（" + bk.totalChars + "）");
+    ok(bk.anchor && typeof bk.anchor.b === "number", "閱讀位置仍是合法錨點", JSON.stringify(bk.anchor));
+    flush("DONE");
+  }).catch(function (e) {
+    fail++;
+    lines.push("[X] 測試中斷：" + (e && e.message ? e.message : e));
+    flush("DONE");
+  });
+
+  flush("PARTIAL");
+})();
+</script>
+</body>
+</html>

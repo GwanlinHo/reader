@@ -33,6 +33,7 @@
 
 1. **位置錨點是 `{ b: 區塊索引, o: 區塊內字元位移 }`**，不存 `scrollTop` 也不存百分比。調字級、換字體、換裝置都能回到同一句。進度、註解、目錄跳頁全部共用這個錨點。
 2. **書本 id 是檔案內容的 SHA-256**，不是檔名。同一本書重新匯入還能接回原有進度與註解。
+3. **解析器有版本號（`RD.parse.VERSION`）**。解析邏輯修好之後（例如某類 epub 原本抓不到正文），開書時發現存下來的版本較舊，會自動用原始檔重新解析，並用百分比接回閱讀位置、用引文把註解重新定位。改動 `parse.js` 的輸出行為時記得把 `VERSION` +1。
 
 ### 文件模型
 
@@ -68,11 +69,14 @@ doc = {
 tests/run_all.sh      # 純函式 + 端到端 + 離線
 tests/run_pure.sh     # 斷句、語言分段、編碼、epub 解析（headless chromium + dump-dom）
 tests/run_e2e.sh      # 用 iframe 載入真正的 index.html，模擬匯入、閱讀、翻頁、註解、朗讀（語音用替身）
+tests/run_upgrade.sh  # 舊版解析結果要能在開書時自動重新解析，且進度與註解接得回來
 tests/run_sw.sh       # service worker 預先快取與斷網重新載入
 tests/run_real.sh     # 真實電子書（需自行放 tests/fixtures/real_en.epub、real_zh.epub）
 tests/shot.py         # 截圖目視檢查版面
 ```
 
 端到端與離線測試用 `tests/drive.py`（CDP，真實時間輪詢）驅動；不要用 `--virtual-time-budget`，虛擬時間會把 setTimeout 快轉、IndexedDB 的真實 I/O 卻還沒回來，測試會誤判超時。
+
+單一檔案解析不如預期時，把書放進 `tests/fixtures/`，開 `tests/test_diag.html?f=檔名` 可以看到章節切法與前幾個區塊。
 
 iOS 的朗讀行為（切音、回前景接續、螢幕常亮）只能在真機手測。
