@@ -9,6 +9,7 @@
  *   Promise.try          18.2
  *   Promise.withResolvers / AbortSignal.any   17.4
  *   Object.hasOwn / findLast / findLastIndex / at / replaceAll   15.4
+ *   ReadableStream 的非同步迭代（for await of）  Safari 至今仍不支援
  *
  * 這裡只補 pdf.js 真的會用到的，而且一律先檢查再補，不覆蓋原生實作。
  */
@@ -140,6 +141,45 @@ if (typeof globalThis.structuredClone !== "function") {
     Object.keys(value).forEach(function (k) { out[k] = clone(value[k], seen); });
     return out;
   };
+}
+
+/* pdf.js 的 getTextContent() 寫成 `for await (const chunk of stream)`，
+   也就是對 ReadableStream 做非同步迭代。Chrome 與 Firefox 有，**Safari 沒有**，
+   會丟出「undefined is not a function」而且指向那一行的 `... of ...`。
+   這是 iOS 上匯入 PDF 失敗的真正原因。 */
+if (typeof ReadableStream !== "undefined" &&
+    typeof Symbol !== "undefined" && Symbol.asyncIterator &&
+    typeof ReadableStream.prototype[Symbol.asyncIterator] !== "function") {
+  var streamValues = function (options) {
+    var reader = this.getReader();
+    var preventCancel = !!(options && options.preventCancel);
+    var iterator = {
+      next: function () { return reader.read(); },
+      "return": function (value) {
+        if (preventCancel) {
+          reader.releaseLock();
+          return Promise.resolve({ done: true, value: value });
+        }
+        return Promise.resolve(reader.cancel(value)).then(function () {
+          reader.releaseLock();
+          return { done: true, value: value };
+        }, function (err) {
+          reader.releaseLock();
+          throw err;
+        });
+      },
+      "throw": function (err) {
+        reader.releaseLock();
+        return Promise.reject(err);
+      }
+    };
+    iterator[Symbol.asyncIterator] = function () { return iterator; };
+    return iterator;
+  };
+  define(ReadableStream.prototype, "values", streamValues);
+  Object.defineProperty(ReadableStream.prototype, Symbol.asyncIterator, {
+    value: streamValues, writable: true, configurable: true, enumerable: false
+  });
 }
 
 /* 讓呼叫端可以確認補丁真的載進來了 */

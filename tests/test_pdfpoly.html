@@ -51,7 +51,22 @@
   if (typeof AbortSignal !== "undefined") strip(AbortSignal, "any", "AbortSignal.any");
   strip(window, "structuredClone", "structuredClone");
 
+  /* 這一項才是 iOS 真正卡住的地方：Safari 的 ReadableStream 不能 for await */
+  var hadStreamIter = typeof ReadableStream !== "undefined" &&
+                      typeof ReadableStream.prototype[Symbol.asyncIterator] === "function";
+  var originalStreamIter = hadStreamIter ? ReadableStream.prototype[Symbol.asyncIterator] : null;
+  if (hadStreamIter) {
+    delete ReadableStream.prototype[Symbol.asyncIterator];
+    ok(typeof ReadableStream.prototype[Symbol.asyncIterator] !== "function",
+       "已移除 ReadableStream 的非同步迭代（模擬 Safari）");
+  }
+
   function restore() {
+    if (hadStreamIter) {
+      Object.defineProperty(ReadableStream.prototype, Symbol.asyncIterator, {
+        value: originalStreamIter, writable: true, configurable: true, enumerable: false
+      });
+    }
     removed.forEach(function (r) {
       try {
         Object.defineProperty(r.obj, r.key, {
@@ -112,6 +127,27 @@
       ok(AbortSignal.any([done.signal]).aborted, "傳入已中止的 signal 會直接是中止狀態");
     }
 
+    ok(typeof ReadableStream.prototype[Symbol.asyncIterator] === "function",
+       "補回 ReadableStream 的非同步迭代");
+
+    /* 直接驗一次 for await：pdf.js 的 getTextContent 就是這樣寫的 */
+    var stream = new ReadableStream({
+      start: function (c) { c.enqueue("甲"); c.enqueue("乙"); c.enqueue("丙"); c.close(); }
+    });
+    return (async function () {
+      var got = [];
+      for await (var chunk of stream) got.push(chunk);
+      eq(got.join(""), "甲乙丙", "for await 讀得到串流裡的每一塊");
+
+      /* 中途 break 要能正常收尾，不會卡住 */
+      var s2 = new ReadableStream({
+        start: function (c) { c.enqueue(1); c.enqueue(2); c.enqueue(3); c.close(); }
+      });
+      var n = 0;
+      for await (var x of s2) { n++; if (n === 2) break; }
+      eq(n, 2, "中途 break 可以正常離開迴圈");
+    })();
+  }).then(function () {
     /* ---------- 最重要的一項：在這種環境下 pdf.js 仍然要能解析 ---------- */
     return fetch("fixtures/text_zh.pdf").then(function (r) { return r.arrayBuffer(); });
   }).then(function (buf) {
@@ -120,6 +156,8 @@
     eq(r.format, "pdf", "缺新 API 的環境下仍解析成文字型 PDF");
     var all = r.doc.blocks.map(function (b) { return b.t; }).join("\n");
     ok(all.indexOf("空山不見人") !== -1, "缺新 API 的環境下仍抽得到正文", all.slice(0, 120));
+    ok(all.indexOf("測試文件") !== -1, "標題也抽得到");
+    ok(r.doc.totalChars > 100, "抽出來的字數合理", r.doc.totalChars);
   }).catch(function (e) {
     fail++;
     lines.push("[X] 測試中斷：" + ((e && e.message) || e));
