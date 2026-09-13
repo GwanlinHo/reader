@@ -29,7 +29,7 @@ PDF 分兩種，走完全不同的路：
 
 幾個踩過的坑：
 
-- **pdf.js 6 用了 ES2025 的 `Promise.try`**，Chromium 126 與 Safari 18.2 以前都沒有。主執行緒由 `pdfdoc.js` 補上，worker 由 `vendor/pdf.worker.shim.mjs` 補（必須用動態 `import()`，靜態 import 會被提升，補丁來不及生效）。改版本時先確認這件事。
+- **pdf.js 6 直接呼叫好幾個較新的 API，legacy build 也一樣**。舊一點的 Safari 會丟出「undefined is not a function」，而且錯在壓縮過的程式碼裡、完全看不出原因（實機踩過）。`vendor/pdf.polyfills.mjs` 補上這些：`Promise.try`（Safari 18.2）、`Promise.withResolvers`／`AbortSignal.any`（17.4）、`Object.hasOwn`／`findLast`／`findLastIndex`／`at`／`replaceAll`／`structuredClone`（15.4）。**主執行緒與 worker 都要在載入 pdf.js 之前先載補丁**，而且一律用動態 `import()`（靜態 import 會被提升，補丁來不及生效）。升級 pdf.js 版本時先重跑 `tests/run_pdfpoly.sh`。
 - **pdf.js 會把傳進去的 ArrayBuffer 轉移給 worker**，原本那份就被卸離、不能再用。匯入流程之後還要把原始檔存進 IndexedDB，所以 `openPdf()` 一定先複製一份。
 - **中文 PDF 的字型常把「文」「一」「長」對應到康熙部首區**（U+2F00 起）或 CJK 部首補充區（U+2E80 起），直接讀會是看不懂的怪字、朗讀也唸不出來。`fixRadicals()` 用 NFKC 加一張小對照表還原。
 - **動態 `import()` 的路徑一定要是絕對網址或 `./` 開頭**，否則會被當成模組名稱而解析失敗。
@@ -45,7 +45,7 @@ PDF 分兩種，走完全不同的路：
 | `zip.js` | 最小 ZIP 讀取器（只讀中央目錄，用 `DecompressionStream('deflate-raw')` 解壓） |
 | `parse.js` | txt 編碼偵測與分段、epub（OPF／spine／nav／NCX）→ 統一文件模型；PDF 轉交 `pdfdoc.js` |
 | `pdfdoc.js` | PDF：動態載入 pdf.js、抽文字層、組段落、判斷掃描書（文字組裝全是純函式） |
-| `vendor/` | pdf.js 主程式與 worker（固定版本 6.3.289 legacy build）、`pdf.worker.shim.mjs`、`cmaps/` 中日韓編碼表 |
+| `vendor/` | pdf.js 主程式與 worker（固定版本 6.3.289 legacy build）、`pdf.polyfills.mjs`（舊 Safari 補丁）、`pdf.worker.shim.mjs`、`cmaps/` 中日韓編碼表 |
 | `db.js` | IndexedDB：`books`（書目與進度）、`docs`（解析結果）、`files`（原始位元組）、`annots`（註解） |
 | `speech.js` | 朗讀引擎：佇列、世代機制、音訊保活、螢幕常亮、中英雙語音 |
 | `app.js` | 書架、閱讀、翻頁、朗讀整合、註解、設定、備份 |
@@ -71,7 +71,7 @@ doc = {
 
 ## 維護鐵律
 
-- **改動任何被快取的檔案後，把 `sw.js` 開頭的 `reader-vN` 版本號 +1**，否則使用者會一直用舊快取。目前 v4。
+- **改動任何被快取的檔案後，把 `sw.js` 開頭的 `reader-vN` 版本號 +1**，否則使用者會一直用舊快取。目前 v5。
 - **`vendor/` 底下的 pdf.js 不要加進 `sw.js` 的預先快取清單**，理由見上面的 PDF 章節。
 - 程式與介面不使用 emoji，狀態用 `[O]`／`[X]`／`[!]`。
 - 書檔與任何第三方內容不進這個公開 repo（`tests/fixtures/` 已在 `.gitignore`）。
@@ -97,6 +97,7 @@ tests/run_e2e.sh      # 用 iframe 載入真正的 index.html，模擬匯入、�
 tests/run_upgrade.sh  # 舊版解析結果要能在開書時自動重新解析，且進度與註解接得回來
 tests/run_pdf.sh      # PDF：部首還原、接行、頁首頁尾、分段、掃描判斷 + 真的解析三份 PDF
 tests/run_pdfe2e.sh   # PDF 端到端：匯入／開啟／朗讀／註解／翻頁／跳頁／重開接續
+tests/run_pdfpoly.sh  # 把新 API 拔掉模擬舊 Safari，確認補丁補得起來且仍解析得出內容
 tests/run_sw.sh       # service worker 預先快取與斷網重新載入
 tests/run_real.sh     # 真實電子書（需自行放 tests/fixtures/real_en.epub、real_zh.epub）
 tests/shot.py         # 截圖目視檢查版面

@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head><meta charset="UTF-8"><title>閱讀者：PDF 舊瀏覽器補丁測試</title></head>
+<body>
+<pre id="log">RUNNING</pre>
+<script src="../segment.js"></script>
+<script src="../zip.js"></script>
+<script src="../pdfdoc.js"></script>
+<script src="../parse.js"></script>
+<script>
+/* 這支測試刻意把 pdf.js 需要的新 API 從這個頁面拿掉，模擬比較舊的 Safari，
+   然後確認補丁補得起來、而且 pdf.js 仍然解析得出內容。
+   （worker 是另一個全域環境，這裡拔不掉，所以只驗主執行緒那一半。） */
+(function () {
+  var lines = [], pass = 0, fail = 0;
+  function ok(cond, name, extra) {
+    if (cond) { pass++; lines.push("[O] " + name); }
+    else { fail++; lines.push("[X] " + name + (extra !== undefined ? "  << " + String(extra).slice(0, 200) : "")); }
+    paint("RUNNING");
+  }
+  function eq(a, b, name) { ok(a === b, name, JSON.stringify(a) + " != " + JSON.stringify(b)); }
+  function paint(tag) {
+    document.getElementById("log").textContent =
+      lines.join("\n") + "\n" + tag + " PASS=" + pass + " FAIL=" + fail;
+  }
+
+  RD.pdfdoc.BASE = "../";
+
+  var TA = Object.getPrototypeOf(Int8Array.prototype);
+
+  /* ---------- 先拆掉，模擬舊 Safari ---------- */
+  var removed = [];
+  function strip(obj, key, label) {
+    if (!obj || typeof obj[key] !== "function") return;
+    var original = obj[key];
+    removed.push({ obj: obj, key: key, original: original });
+    try {
+      delete obj[key];
+    } catch (e) { /* 拿不掉就算了 */ }
+    ok(typeof obj[key] !== "function", "已移除 " + label + "（模擬舊瀏覽器）");
+  }
+
+  strip(Promise, "withResolvers", "Promise.withResolvers");
+  strip(Promise, "try", "Promise.try");
+  strip(Object, "hasOwn", "Object.hasOwn");
+  strip(Array.prototype, "at", "Array.prototype.at");
+  strip(Array.prototype, "findLast", "Array.prototype.findLast");
+  strip(Array.prototype, "findLastIndex", "Array.prototype.findLastIndex");
+  strip(TA, "at", "TypedArray.prototype.at");
+  strip(String.prototype, "replaceAll", "String.prototype.replaceAll");
+  if (typeof AbortSignal !== "undefined") strip(AbortSignal, "any", "AbortSignal.any");
+  strip(window, "structuredClone", "structuredClone");
+
+  function restore() {
+    removed.forEach(function (r) {
+      try {
+        Object.defineProperty(r.obj, r.key, {
+          value: r.original, writable: true, configurable: true, enumerable: false
+        });
+      } catch (e) { /* 忽略 */ }
+    });
+  }
+
+  /* ---------- 載入補丁並逐項驗證 ---------- */
+
+  import("../vendor/pdf.polyfills.mjs?t=" + Date.now()).then(function (mod) {
+    ok(mod.PDF_POLYFILLS_READY === true, "補丁模組載入成功");
+
+    ok(typeof Promise.withResolvers === "function", "補回 Promise.withResolvers");
+    var wr = Promise.withResolvers();
+    ok(wr && wr.promise && typeof wr.resolve === "function" && typeof wr.reject === "function",
+       "withResolvers 回傳 promise／resolve／reject");
+
+    ok(typeof Promise.try === "function", "補回 Promise.try");
+
+    ok(typeof Object.hasOwn === "function", "補回 Object.hasOwn");
+    ok(Object.hasOwn({ a: 1 }, "a"), "hasOwn 認得自有屬性");
+    ok(!Object.hasOwn({ a: 1 }, "toString"), "hasOwn 不算繼承來的屬性");
+
+    eq([1, 2, 3].at(-1), 3, "Array.at 支援負索引");
+    eq([1, 2, 3].at(0), 1, "Array.at 正索引");
+    eq([1, 2, 3].at(9), undefined, "Array.at 超出範圍回 undefined");
+    eq(new Uint8Array([7, 8, 9]).at(-1), 9, "TypedArray.at 也補上了");
+
+    eq([1, 2, 3, 4].findLast(function (x) { return x % 2 === 1; }), 3, "findLast 由後往前找");
+    eq([1, 2, 3, 4].findLastIndex(function (x) { return x % 2 === 1; }), 2, "findLastIndex 回索引");
+    eq([1, 2].findLast(function () { return false; }), undefined, "findLast 找不到回 undefined");
+
+    eq("a-b-c".replaceAll("-", "+"), "a+b+c", "replaceAll 換掉全部");
+
+    var sc = window.structuredClone({
+      n: 1, s: "字", arr: [1, { deep: true }], d: new Date(0), u8: new Uint8Array([1, 2])
+    });
+    eq(sc.n, 1, "structuredClone 複製數字");
+    eq(sc.arr[1].deep, true, "structuredClone 深層複製");
+    eq(sc.u8[1], 2, "structuredClone 複製 TypedArray");
+    ok(sc.d instanceof Date && sc.d.getTime() === 0, "structuredClone 複製日期");
+    var cyc = { name: "自己" };
+    cyc.self = cyc;
+    var c2 = window.structuredClone(cyc);
+    ok(c2.self === c2, "structuredClone 處理循環參照");
+
+    if (typeof AbortSignal !== "undefined" && typeof AbortController !== "undefined") {
+      ok(typeof AbortSignal.any === "function", "補回 AbortSignal.any");
+      var a = new AbortController(), b = new AbortController();
+      var any = AbortSignal.any([a.signal, b.signal]);
+      ok(!any.aborted, "AbortSignal.any 一開始沒有中止");
+      b.abort();
+      ok(any.aborted, "任一個中止就跟著中止");
+      var done = new AbortController();
+      done.abort();
+      ok(AbortSignal.any([done.signal]).aborted, "傳入已中止的 signal 會直接是中止狀態");
+    }
+
+    /* ---------- 最重要的一項：在這種環境下 pdf.js 仍然要能解析 ---------- */
+    return fetch("fixtures/text_zh.pdf").then(function (r) { return r.arrayBuffer(); });
+  }).then(function (buf) {
+    return RD.parse.parseFile("補丁測試.pdf", buf);
+  }).then(function (r) {
+    eq(r.format, "pdf", "缺新 API 的環境下仍解析成文字型 PDF");
+    var all = r.doc.blocks.map(function (b) { return b.t; }).join("\n");
+    ok(all.indexOf("空山不見人") !== -1, "缺新 API 的環境下仍抽得到正文", all.slice(0, 120));
+  }).catch(function (e) {
+    fail++;
+    lines.push("[X] 測試中斷：" + ((e && e.message) || e));
+  }).then(function () {
+    restore();
+    ok(typeof Promise.withResolvers === "function", "測試結束後把原生實作還回去");
+    paint("DONE");
+  });
+})();
+</script>
+</body>
+</html>

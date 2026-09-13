@@ -233,6 +233,20 @@
 
   /* ---------- 匯入 ---------- */
 
+  /* 匯入失敗時要能一眼看出原因：帶上錯誤類別與出事的那一層，
+     不然使用者只會看到「undefined is not a function」這種查不出來源的訊息。 */
+  function errText(e) {
+    if (!e) return "解析失敗";
+    var msg = e.message || String(e);
+    var name = e.name && e.name !== "Error" ? e.name + ": " : "";
+    var where = "";
+    if (e.stack) {
+      var line = String(e.stack).split("\n").filter(function (l) { return l.trim(); })[0] || "";
+      if (line && line.indexOf(msg) === -1) where = "｜" + line.trim().slice(0, 80);
+    }
+    return name + msg + where;
+  }
+
   function importFiles(files) {
     var list = Array.prototype.slice.call(files || []);
     if (!list.length) return;
@@ -243,7 +257,7 @@
     list.forEach(function (f) {
       chain = chain.then(function () {
         return addBook(f).then(function () { okCount++; })
-          .catch(function (e) { fail.push((f.name || "檔案") + "：" + (e && e.message ? e.message : "解析失敗")); });
+          .catch(function (e) { fail.push((f.name || "檔案") + "：" + errText(e)); });
       });
     });
     return chain.then(function () {

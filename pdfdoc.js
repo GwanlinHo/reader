@@ -16,6 +16,7 @@
   var RD = (window.RD = window.RD || {});
 
   var SRC = "vendor/pdf.min.mjs";
+  var POLYFILLS = "vendor/pdf.polyfills.mjs";
   var WORKER = "vendor/pdf.worker.shim.mjs";
   var CMAPS = "vendor/cmaps/";
 
@@ -237,15 +238,7 @@
 
   var libPromise = null;
 
-  function ensurePromiseTry() {
-    if (typeof Promise.try !== "function") {
-      /* pdf.js 6 用到 ES2025 的 Promise.try，舊瀏覽器沒有。worker 那邊由 shim 補。 */
-      Promise.try = function (fn) {
-        var args = Array.prototype.slice.call(arguments, 1);
-        return new Promise(function (resolve) { resolve(fn.apply(undefined, args)); });
-      };
-    }
-  }
+
 
   function base() {
     /* 讓 tests/ 底下的頁面也能用相對路徑載入 */
@@ -264,13 +257,15 @@
 
   function load() {
     if (libPromise) return libPromise;
-    ensurePromiseTry();
-    libPromise = import(/* webpackIgnore: true */ url(SRC)).then(function (lib) {
+    /* 補丁一定要先載完才能載 pdf.js：它在模組載入當下就會用到那些新 API */
+    libPromise = import(/* webpackIgnore: true */ url(POLYFILLS)).then(function () {
+      return import(/* webpackIgnore: true */ url(SRC));
+    }).then(function (lib) {
       lib.GlobalWorkerOptions.workerSrc = url(WORKER);
       return lib;
     }).catch(function (e) {
       libPromise = null;
-      throw new Error("PDF 元件載入失敗（第一次開 PDF 需要連上網路）：" + (e.message || e));
+      throw new Error("PDF 元件載入失敗（第一次開 PDF 需要連上網路）：" + ((e && e.message) || e));
     });
     return libPromise;
   }
@@ -392,6 +387,7 @@
     VERSION: 1,
     BASE: "",
     SRC: SRC,
+    POLYFILLS: POLYFILLS,
     WORKER: WORKER,
     CMAPS: CMAPS,
     MIN_CHARS_PER_PAGE: MIN_CHARS_PER_PAGE,

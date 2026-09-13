@@ -1,10 +1,5 @@
-/* pdf.js 6 的 worker 用到 ES2025 的 Promise.try，較舊的瀏覽器（例如 Chromium 126、
-   Safari 18.2 以前）沒有這個方法。這層 shim 先補上再載入真正的 worker。
-   必須用動態 import：靜態 import 會被提升，補丁會來不及生效。 */
-if (typeof Promise.try !== 'function') {
-  Promise.try = function (fn) {
-    var args = Array.prototype.slice.call(arguments, 1);
-    return new Promise(function (resolve) { resolve(fn.apply(undefined, args)); });
-  };
-}
+/* pdf.js 的 worker 進入點。
+   先載入 API 補丁，再載入真正的 worker —— 兩個都必須用動態 import：
+   靜態 import 會被提升到最前面執行，補丁會來不及生效。 */
+await import('./pdf.polyfills.mjs');
 await import('./pdf.worker.min.mjs');
