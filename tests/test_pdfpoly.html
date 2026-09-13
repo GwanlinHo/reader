@@ -129,6 +129,8 @@
 
     ok(typeof ReadableStream.prototype[Symbol.asyncIterator] === "function",
        "補回 ReadableStream 的非同步迭代");
+    ok(typeof RD.pdfdoc.readTextContent === "function",
+       "抽文字改走不需要 for await 的串流讀取（不靠補丁也能動）");
 
     /* 直接驗一次 for await：pdf.js 的 getTextContent 就是這樣寫的 */
     var stream = new ReadableStream({

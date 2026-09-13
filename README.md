@@ -29,7 +29,8 @@ PDF 分兩種，走完全不同的路：
 
 幾個踩過的坑：
 
-- **pdf.js 6 直接呼叫好幾個較新的 API，legacy build 也一樣**。舊一點的 Safari 會丟出「undefined is not a function」，而且錯在壓縮過的程式碼裡、完全看不出原因（實機踩過）。`vendor/pdf.polyfills.mjs` 補上這些：`Promise.try`（Safari 18.2）、`Promise.withResolvers`／`AbortSignal.any`（17.4）、`Object.hasOwn`／`findLast`／`findLastIndex`／`at`／`replaceAll`／`structuredClone`（15.4），以及 **`ReadableStream` 的非同步迭代（Safari 至今不支援）**—— 最後這一項才是 iOS 上真正卡死的地方，`getTextContent()` 內部就是 `for await (const chunk of stream)`。**主執行緒與 worker 都要在載入 pdf.js 之前先載補丁**，而且一律用動態 `import()`（靜態 import 會被提升，補丁來不及生效）。升級 pdf.js 版本時先重跑 `tests/run_pdfpoly.sh`。
+- **pdf.js 6 直接呼叫好幾個較新的 API，legacy build 也一樣**。舊一點的 Safari 會丟出「undefined is not a function」，而且錯在壓縮過的程式碼裡、完全看不出原因（實機踩過）。`vendor/pdf.polyfills.mjs` 補上這些：`Promise.try`（Safari 18.2）、`Promise.withResolvers`／`AbortSignal.any`（17.4）、`Object.hasOwn`／`findLast`／`findLastIndex`／`at`／`replaceAll`／`structuredClone`（15.4），以及 **`ReadableStream` 的非同步迭代（Safari 至今不支援）**—— 最後這一項才是 iOS 上真正卡死的地方，`getTextContent()` 內部就是 `for await (const chunk of stream)`。
+- **但不要只靠補丁**：`pdfdoc.js` 的 `readTextContent()` 已改成直接用 `page.streamTextContent()` + `reader.read()` 迴圈收資料，完全不經過 `for await`。這樣即使補丁沒載到（例如使用者手上還是舊快取），抽文字仍然走得通。`tests/run_pdfnostream.sh` 就是把非同步迭代拔掉且不補回來，專門守住這件事。**主執行緒與 worker 都要在載入 pdf.js 之前先載補丁**，而且一律用動態 `import()`（靜態 import 會被提升，補丁來不及生效）。升級 pdf.js 版本時先重跑 `tests/run_pdfpoly.sh`。
 - **pdf.js 會把傳進去的 ArrayBuffer 轉移給 worker**，原本那份就被卸離、不能再用。匯入流程之後還要把原始檔存進 IndexedDB，所以 `openPdf()` 一定先複製一份。
 - **中文 PDF 的字型常把「文」「一」「長」對應到康熙部首區**（U+2F00 起）或 CJK 部首補充區（U+2E80 起），直接讀會是看不懂的怪字、朗讀也唸不出來。`fixRadicals()` 用 NFKC 加一張小對照表還原。
 - **動態 `import()` 的路徑一定要是絕對網址或 `./` 開頭**，否則會被當成模組名稱而解析失敗。
@@ -71,7 +72,7 @@ doc = {
 
 ## 維護鐵律
 
-- **改動任何被快取的檔案後，把 `sw.js` 開頭的 `reader-vN` 版本號 +1**，否則使用者會一直用舊快取。目前 v6。
+- **改動任何被快取的檔案後，把 `sw.js` 開頭的 `reader-vN` 版本號 +1**，否則使用者會一直用舊快取。目前 v7，同時要更新 index.html 說明面板裡的 `#build-id`。
 - **`vendor/` 底下的 pdf.js 不要加進 `sw.js` 的預先快取清單**，理由見上面的 PDF 章節。
 - 程式與介面不使用 emoji，狀態用 `[O]`／`[X]`／`[!]`。
 - 書檔與任何第三方內容不進這個公開 repo（`tests/fixtures/` 已在 `.gitignore`）。

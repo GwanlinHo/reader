@@ -292,9 +292,45 @@
     });
   }
 
+  /* 不要用 page.getTextContent()：它內部是 `for await (const chunk of stream)`，
+     而 Safari 至今不支援對 ReadableStream 做非同步迭代，會丟出
+     「undefined is not a function」。改用同一個公開 API 的串流版本，自己用
+     reader.read() 收，完全不依賴那個語法。 */
+  function readTextContent(page) {
+    if (typeof page.streamTextContent !== "function") return page.getTextContent();
+    var stream;
+    try {
+      stream = page.streamTextContent({});
+    } catch (e) {
+      return page.getTextContent();
+    }
+    if (!stream || typeof stream.getReader !== "function") return page.getTextContent();
+
+    var reader = stream.getReader();
+    var items = [];
+    var styles = Object.create(null);
+    var lang = null;
+
+    function pump() {
+      return reader.read().then(function (r) {
+        if (r.done) return { items: items, styles: styles, lang: lang };
+        var v = r.value;
+        if (v) {
+          if (lang === null && v.lang != null) lang = v.lang;
+          if (v.styles) Object.assign(styles, v.styles);
+          if (v.items && v.items.length) {
+            for (var i = 0; i < v.items.length; i++) items.push(v.items[i]);
+          }
+        }
+        return pump();
+      });
+    }
+    return pump();
+  }
+
   function pageText(pdf, n) {
     return pdf.getPage(n).then(function (page) {
-      return page.getTextContent().then(function (tc) {
+      return readTextContent(page).then(function (tc) {
         return itemsToLines(tc.items);
       });
     });
@@ -402,6 +438,7 @@
     outlineToChapters: outlineToChapters,
     url: url,
     load: load,
+    readTextContent: readTextContent,
     openPdf: openPdf,
     toDoc: toDoc
   };

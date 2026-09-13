@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head><meta charset="UTF-8"><title>閱讀者：不靠補丁也要能抽文字</title></head>
+<body>
+<pre id="log">RUNNING</pre>
+<script src="../segment.js"></script>
+<script src="../zip.js"></script>
+<script src="../pdfdoc.js"></script>
+<script src="../parse.js"></script>
+<script>
+/* 把 ReadableStream 的非同步迭代整個拿掉，而且不還原，
+   確認就算補丁失效（例如使用者手上還是舊快取），抽文字這條路仍然走得通。 */
+(function () {
+  var lines = [], pass = 0, fail = 0;
+  function ok(cond, name, extra) {
+    if (cond) { pass++; lines.push("[O] " + name); }
+    else { fail++; lines.push("[X] " + name + (extra !== undefined ? "  << " + String(extra).slice(0, 200) : "")); }
+    paint("RUNNING");
+  }
+  function eq(a, b, name) { ok(a === b, name, JSON.stringify(a) + " != " + JSON.stringify(b)); }
+  function paint(tag) {
+    document.getElementById("log").textContent =
+      lines.join("\n") + "\n" + tag + " PASS=" + pass + " FAIL=" + fail;
+  }
+
+  RD.pdfdoc.BASE = "../";
+
+  var had = typeof ReadableStream !== "undefined" &&
+            typeof ReadableStream.prototype[Symbol.asyncIterator] === "function";
+  if (had) delete ReadableStream.prototype[Symbol.asyncIterator];
+  ok(typeof ReadableStream.prototype[Symbol.asyncIterator] !== "function",
+     "已移除 ReadableStream 的非同步迭代（模擬 Safari，且不補回來）");
+
+  /* 補丁本身會把非同步迭代補回來，所以先讓 pdf.js 完整載入（含補丁），
+     再把它拔掉一次，這樣下面的解析就真的沒有那個 API 可用。 */
+  RD.pdfdoc.load().then(function () {
+    try { delete ReadableStream.prototype[Symbol.asyncIterator]; } catch (e) { /* 忽略 */ }
+    ok(typeof ReadableStream.prototype[Symbol.asyncIterator] !== "function",
+       "pdf.js 與補丁都載入後再拔一次，確認下面完全沒靠它");
+    return fetch("fixtures/text_zh.pdf");
+  }).then(function (r) { return r.arrayBuffer(); })
+    .then(function (buf) { return RD.parse.parseFile("無迭代.pdf", buf); })
+    .then(function (r) {
+      eq(r.format, "pdf", "沒有非同步迭代也解析成文字型 PDF");
+      var all = r.doc.blocks.map(function (b) { return b.t; }).join("\n");
+      ok(all.indexOf("空山不見人") !== -1, "沒有非同步迭代也抽得到正文", all.slice(0, 120));
+      ok(all.indexOf("測試文件") !== -1, "標題也抽得到");
+      ok(r.doc.totalChars > 100, "字數合理", r.doc.totalChars);
+    })
+    .catch(function (e) {
+      fail++;
+      lines.push("[X] 測試中斷：" + ((e && e.message) || e));
+    })
+    .then(function () { paint("DONE"); });
+})();
+</script>
+</body>
+</html>
