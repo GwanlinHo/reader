@@ -560,7 +560,15 @@
       });
     }
     if (fmt === "pdf") {
-      return Promise.reject(new Error("PDF 尚未支援（第二期會加）"));
+      if (!RD.pdfdoc) return Promise.reject(new Error("PDF 元件沒有載入"));
+      return RD.pdfdoc.toDoc(buffer, { title: baseName(fileName) }).then(function (r) {
+        if (r.kind === "image") {
+          /* 掃描書：沒有文字層，交給頁面檢視模式，不做 OCR */
+          return { doc: null, format: "pdf-image", encoding: "", pageCount: r.pageCount };
+        }
+        if (!r.doc.title) r.doc.title = baseName(fileName);
+        return { doc: r.doc, format: "pdf", encoding: "utf-8", pageStart: r.pageStart };
+      });
     }
     try {
       var r = decodeBuffer(buffer);
@@ -583,6 +591,12 @@
     txtToDoc: txtToDoc,
     epubToDoc: epubToDoc,
     parseFile: parseFile,
+    /* 給 pdfdoc.js 用：沿用同一套章節整併／過長切段／統計 */
+    finishPdfDoc: function (blocks, chapters, meta) {
+      var chs = (chapters && chapters.length) ? chapters : chaptersFromHeadings(blocks);
+      return finishDoc(blocks, chs, meta);
+    },
+    chaptersFromHeadings: chaptersFromHeadings,
     looksHeading: looksHeading,
     formatOf: formatOf,
     baseName: baseName,

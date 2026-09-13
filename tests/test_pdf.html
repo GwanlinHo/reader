@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head><meta charset="UTF-8"><title>閱讀者：PDF 測試</title></head>
+<body>
+<pre id="log">RUNNING</pre>
+<script src="../segment.js"></script>
+<script src="../zip.js"></script>
+<script src="../pdfdoc.js"></script>
+<script src="../parse.js"></script>
+<script>
+(function () {
+  var lines = [], pass = 0, fail = 0;
+  function ok(cond, name, extra) {
+    if (cond) { pass++; lines.push("[O] " + name); }
+    else { fail++; lines.push("[X] " + name + (extra !== undefined ? "  << " + String(extra).slice(0, 300) : "")); }
+    paint("RUNNING");
+  }
+  function eq(a, b, name) { ok(a === b, name, JSON.stringify(a) + " != " + JSON.stringify(b)); }
+  function paint(tag) {
+    document.getElementById("log").textContent =
+      lines.join("\n") + "\n" + tag + " PASS=" + pass + " FAIL=" + fail;
+  }
+
+  var P = RD.pdfdoc;
+  P.BASE = "../";
+
+  /* ================= 純函式：康熙部首還原 ================= */
+
+  eq(P.fixRadicals("測試\u2F42件"), "測試文件", "康熙部首的「文」還原成一般漢字");
+  eq(P.fixRadicals("第\u2F00段"), "第一段", "康熙部首的「一」還原");
+  eq(P.fixRadicals("\u2F64來"), "用來", "康熙部首的「用」還原");
+  eq(P.fixRadicals("\u2ED1城"), "長城", "部首補充區的「長」靠對照表還原");
+  eq(P.fixRadicals("\u2EE4故事"), "鬼故事", "部首補充區的「鬼」靠對照表還原");
+  eq(P.fixRadicals("正常的中文"), "正常的中文", "正常漢字不動");
+  eq(P.fixRadicals("ABC 123"), "ABC 123", "英數不動");
+  eq(P.fixRadicals("全形：，。"), "全形：，。", "全形標點不被 NFKC 改掉");
+
+  /* ================= 純函式：接行 ================= */
+
+  eq(P.joinLines("中文第一行", "第二行"), "中文第一行第二行", "中文接行不加空白");
+  eq(P.joinLines("hello", "world"), "hello world", "英文接行補一個空白");
+  eq(P.joinLines("inter-", "national"), "international", "英文斷字接回去");
+  eq(P.joinLines("中文", "english"), "中文english", "中英交界不加空白");
+  eq(P.joinLines("", "起頭"), "起頭", "空的前文直接用後文");
+
+  /* ================= 純函式：文字項目 → 行 ================= */
+
+  function item(str, x, y, h, eol) {
+    return { str: str, transform: [h, 0, 0, h, x, y], height: h, hasEOL: !!eol };
+  }
+
+  var ls = P.itemsToLines([
+    item("第一行", 60, 700, 12, true),
+    item("第二行", 60, 680, 12, true)
+  ]);
+  eq(ls.length, 2, "hasEOL 切出兩行");
+  eq(ls[0].t, "第一行", "第一行內容正確");
+  eq(ls[1].y, 680, "第二行的 y 座標保留");
+
+  ls = P.itemsToLines([
+    item("前半", 60, 700, 12, false),
+    item("後半", 100, 700, 12, true)
+  ]);
+  eq(ls.length, 1, "同一行的兩個項目併成一行");
+  eq(ls[0].t, "前半後半", "同一行內容接起來");
+  eq(ls[0].x, 60, "行的 x 取最左邊");
+
+  ls = P.itemsToLines([
+    item("上行", 60, 700, 12, false),
+    item("下行", 60, 680, 12, false)
+  ]);
+  eq(ls.length, 2, "沒有 hasEOL 時靠 y 落差斷行");
+
+  ls = P.itemsToLines([item("   ", 60, 700, 12, true), item("有字", 60, 680, 12, true)]);
+  eq(ls.length, 1, "只有空白的行被丟掉");
+
+  eq(P.itemsToLines([]).length, 0, "沒有項目就沒有行");
+  eq(P.itemsToLines(null).length, 0, "null 不會爆掉");
+
+  /* ================= 純函式：頁首頁尾 ================= */
+
+  function L(t, y, x, h) { return { t: t, x: x === undefined ? 60 : x, y: y, h: h || 12 }; }
+
+  var pages = [];
+  for (var i = 0; i < 5; i++) {
+    pages.push([L("我的書名", 760), L("正文第 " + i + " 段", 700), L(String(i + 1), 60)]);
+  }
+  var cleaned = P.stripRunningHeads(pages);
+  ok(cleaned.every(function (p) { return p.length === 1; }), "每頁重複的頁首與頁碼都被拿掉",
+     JSON.stringify(cleaned[0]));
+  ok(cleaned[0][0].t.indexOf("正文") === 0, "留下來的是正文");
+
+  var mixed = [
+    [L("書名", 760), L("內容甲", 700)],
+    [L("書名", 760), L("內容乙", 700)],
+    [L("不一樣的開頭", 760), L("內容丙", 700)]
+  ];
+  var c2 = P.stripRunningHeads(mixed);
+  eq(c2[2].length, 2, "只出現一次的首行不算頁首，不會被誤刪");
+
+  var few = [[L("標題", 760), L("- 12 -", 60)]];
+  eq(P.stripRunningHeads(few)[0].length, 1, "頁數太少時仍會拿掉純頁碼行");
+
+  /* ================= 純函式：行 → 區塊 ================= */
+
+  var built = P.linesToBlocks([[
+    L("第一章 山中", 760, 60, 18),
+    L("空山不見人，", 730),
+    L("但聞人語響。", 714),
+    L("　返景入深林。", 680, 80)
+  ]]);
+  eq(built.blocks[0].k, "h", "字比較大的行判成標題");
+  eq(built.blocks[0].t, "第一章 山中", "標題內容正確");
+  eq(built.blocks[1].t, "空山不見人，但聞人語響。", "同段的兩行接在一起");
+  eq(built.blocks.length, 3, "縮排另起一段");
+
+  var twoPage = P.linesToBlocks([
+    [L("前頁最後一句還沒", 700)],
+    [L("講完就換頁了。", 700)]
+  ]);
+  eq(twoPage.blocks.length, 1, "跨頁而且沒有句號的段落會接起來");
+  eq(twoPage.pageStart.length, 2, "每頁都有起始索引");
+  eq(twoPage.pageStart[0], 0, "第一頁從第 0 個區塊開始");
+
+  eq(P.linesToBlocks([[]]).blocks.length, 1, "空頁也會產生一個說明區塊");
+
+  /* ================= 純函式：掃描書判斷 ================= */
+
+  ok(P.looksScanned({ pages: 10, chars: 0 }), "完全沒有文字判成掃描書");
+  ok(P.looksScanned({ pages: 10, chars: 100 }), "每頁只有十個字判成掃描書");
+  ok(!P.looksScanned({ pages: 10, chars: 5000 }), "每頁五百字是文字書");
+  ok(P.looksScanned({ pages: 0, chars: 0 }), "零頁當成掃描書（不會除以零）");
+
+  /* ================= 純函式：PDF 目錄 → 章節 ================= */
+
+  var chs = P.outlineToChapters(
+    [{ title: "第二章", page: 3 }, { title: "第一章", page: 2 }],
+    [0, 5, 9], 14);
+  eq(chs.length, 3, "目錄產生三段（含開頭）");
+  eq(chs[0].title, "開頭", "第一頁之前補上開頭");
+  eq(chs[1].title, "第一章", "章節依頁碼排序");
+  eq(chs[1].start, 5, "章節起點對到頁面的第一個區塊");
+  eq(chs[1].end, 9, "章節終點接到下一章");
+  eq(chs[2].end, 14, "最後一章到文件結尾");
+  eq(P.outlineToChapters([], [0], 3).length, 0, "沒有目錄就回空陣列");
+  eq(P.outlineToChapters(null, [0], 3).length, 0, "null 目錄不會爆掉");
+
+  /* ================= 真的解析三份 PDF ================= */
+
+  function get(path) {
+    return fetch(path).then(function (r) {
+      if (!r.ok) throw new Error("抓不到 " + path);
+      return r.arrayBuffer();
+    });
+  }
+
+  function run() {
+    return get("fixtures/text_zh.pdf").then(function (buf) {
+      return RD.parse.parseFile("測試中文.pdf", buf);
+    }).then(function (r) {
+      eq(r.format, "pdf", "中文 PDF 判成文字型");
+      var doc = r.doc;
+      ok(doc.blocks.length >= 4, "抽出多個區塊", doc.blocks.length);
+      var all = doc.blocks.map(function (b) { return b.t; }).join("\n");
+      ok(all.indexOf("測試文件") !== -1, "標題文字正確（部首已還原）", all.slice(0, 120));
+      ok(all.indexOf("空山不見人") !== -1, "正文抓得到", all.slice(0, 200));
+      ok(!/[⺀-⻳⼀-⿕]/.test(all), "整份文件都沒有殘留的康熙部首");
+      ok(all.indexOf("第一章 山中") !== -1, "章節標題在內容裡", all.slice(0, 300));
+      ok(doc.chapters.length >= 1, "有章節");
+      ok(doc.totalChars > 100, "總字數合理", doc.totalChars);
+      var hasH = doc.blocks.some(function (b) { return b.k === "h"; });
+      ok(hasH, "有判出標題區塊");
+      /* 段落不該被每一行拆開 */
+      var longest = Math.max.apply(null, doc.blocks.map(function (b) { return b.t.length; }));
+      ok(longest > 25, "段落有把多行接起來（最長區塊 " + longest + " 字）");
+      return get("fixtures/text_en.pdf");
+    }).then(function (buf) {
+      return RD.parse.parseFile("text_en.pdf", buf);
+    }).then(function (r) {
+      eq(r.format, "pdf", "英文 PDF 判成文字型");
+      var all = r.doc.blocks.map(function (b) { return b.t; }).join("\n");
+      ok(all.indexOf("first paragraph") !== -1, "英文正文抓得到", all.slice(0, 150));
+      ok(/[a-z] [a-z]/i.test(all), "英文字之間有空白");
+      ok(all.indexOf("Chapter One") !== -1, "英文章節標題在內容裡");
+      return get("fixtures/scan.pdf");
+    }).then(function (buf) {
+      return RD.parse.parseFile("掃描書.pdf", buf);
+    }).then(function (r) {
+      eq(r.format, "pdf-image", "沒有文字層的 PDF 判成掃描書");
+      eq(r.doc, null, "掃描書不產生文件模型");
+      eq(r.pageCount, 3, "掃描書回報頁數");
+    });
+  }
+
+  run().then(function () { paint("DONE"); })
+    .catch(function (e) {
+      fail++;
+      lines.push("[X] 測試中斷：" + (e && e.message ? e.message : e));
+      paint("DONE");
+    });
+})();
+</script>
+</body>
+</html>

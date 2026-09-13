@@ -1,6 +1,6 @@
 /* 閱讀者 Service Worker：離線快取（cache-first）
    維護鐵律：改動任何被快取的檔案後，把 CACHE 版本號 +1，使用者下次開啟才會拿到更新。 */
-const CACHE = 'reader-v3';
+const CACHE = 'reader-v4';
 
 const ASSETS = [
   './',
@@ -8,6 +8,7 @@ const ASSETS = [
   './style.css',
   './segment.js',
   './zip.js',
+  './pdfdoc.js',
   './parse.js',
   './db.js',
   './speech.js',

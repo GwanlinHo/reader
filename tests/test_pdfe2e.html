@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head><meta charset="UTF-8"><title>閱讀者：PDF 端到端測試</title>
+<style>
+  body { font: 13px/1.6 monospace; margin: 0; }
+  #log { white-space: pre-wrap; padding: 8px; }
+  iframe { width: 420px; height: 640px; border: 1px solid #ccc; }
+</style>
+</head>
+<body>
+<pre id="log">RUNNING</pre>
+<iframe id="app"></iframe>
+<script>
+(function () {
+  var lines = [], pass = 0, fail = 0;
+  var logEl = document.getElementById("log");
+
+  function flush(tag) {
+    logEl.textContent = lines.join("\n") + "\n" + tag + " PASS=" + pass + " FAIL=" + fail;
+  }
+  function ok(cond, name, extra) {
+    if (cond) { pass++; lines.push("[O] " + name); }
+    else { fail++; lines.push("[X] " + name + (extra !== undefined ? "  << " + String(extra).slice(0, 200) : "")); }
+    flush("PARTIAL");
+  }
+  function eq(a, b, name) { ok(a === b, name, JSON.stringify(a) + " != " + JSON.stringify(b)); }
+  function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  function until(fn, label, timeout) {
+    timeout = timeout || 30000;
+    var t0 = Date.now();
+    return new Promise(function (resolve, reject) {
+      (function tick() {
+        var v;
+        try { v = fn(); } catch (e) { v = null; }
+        if (v) { resolve(v); return; }
+        if (Date.now() - t0 > timeout) { reject(new Error("等不到：" + label)); return; }
+        setTimeout(tick, 40);
+      })();
+    });
+  }
+
+  function wipe() {
+    try { localStorage.removeItem("reader-settings-v1"); } catch (e) { /* 忽略 */ }
+    return new Promise(function (resolve) {
+      var req = indexedDB.deleteDatabase("reader-db");
+      req.onsuccess = req.onerror = req.onblocked = function () { resolve(); };
+      setTimeout(resolve, 2000);
+    });
+  }
+
+  var frame = document.getElementById("app");
+
+  function loadApp() {
+    return new Promise(function (resolve) {
+      frame.onload = function () { resolve(frame.contentWindow); };
+      frame.src = "../index.html?test=1";
+    }).then(function (win) {
+      return until(function () {
+        return win.RD && win.RD.db && win.RD.pdfdoc && win.document.getElementById("shelf-list") ? win : null;
+      }, "app 載入").then(function () { return win; });
+    });
+  }
+
+  function reloadApp() {
+    return new Promise(function (resolve) {
+      frame.onload = function () { resolve(frame.contentWindow); };
+      frame.contentWindow.location.reload();
+    }).then(function (win) {
+      return until(function () { return win.RD && win.RD.db ? win : null; }, "app 重新載入")
+        .then(function () { return win; });
+    });
+  }
+
+  function installSpeechStub(win) {
+    var spoken = [];
+    function Utter(text) {
+      this.text = text; this.lang = ""; this.voice = null;
+      this.rate = 1; this.pitch = 1; this.volume = 1;
+      this.onend = null; this.onerror = null;
+    }
+    var synth = {
+      speaking: false, paused: false, pending: false,
+      getVoices: function () { return []; },
+      speak: function (u) {
+        spoken.push({ text: u.text, lang: u.lang });
+        setTimeout(function () { if (u.onend) u.onend({}); }, 1);
+      },
+      cancel: function () {}, pause: function () {}, resume: function () {},
+      addEventListener: function () {}, onvoiceschanged: null
+    };
+    Object.defineProperty(win, "speechSynthesis", { configurable: true, value: synth });
+    Object.defineProperty(win, "SpeechSynthesisUtterance", { configurable: true, value: Utter });
+    return spoken;
+  }
+
+  function importFixture(win, name) {
+    return fetch("fixtures/" + name).then(function (r) { return r.arrayBuffer(); }).then(function (buf) {
+      var doc = win.document;
+      var input = doc.getElementById("file-input");
+      var file = new win.File([new Uint8Array(buf)], name, { type: "application/pdf" });
+      var dt = new win.DataTransfer();
+      dt.items.add(file);
+      input.files = dt.files;
+      input.dispatchEvent(new win.Event("change"));
+      return until(function () {
+        var t = doc.getElementById("import-status").textContent;
+        if (/失敗|不支援|錯誤/.test(t)) throw new Error("匯入報錯：" + t);
+        return /已匯入/.test(t) ? true : null;
+      }, "匯入完成 " + name + "（狀態：" + doc.getElementById("import-status").textContent + "）", 60000);
+    });
+  }
+
+  function books(win) {
+    return new Promise(function (resolve, reject) {
+      var req = win.indexedDB.open("reader-db");
+      req.onsuccess = function () {
+        var db = req.result;
+        var g = db.transaction(["books"], "readonly").objectStore("books").getAll();
+        g.onsuccess = function () { resolve(g.result); };
+        g.onerror = function () { reject(g.error); };
+      };
+      req.onerror = function () { reject(req.error); };
+    });
+  }
+
+  function bookNamed(win, part) {
+    return books(win).then(function (list) {
+      for (var i = 0; i < list.length; i++) {
+        if ((list[i].fileName || "").indexOf(part) !== -1) return list[i];
+      }
+      return null;
+    });
+  }
+
+  function openFromShelf(win, part) {
+    var doc = win.document;
+    var items = doc.querySelectorAll("#shelf-list li");
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].textContent.indexOf(part) !== -1) {
+        items[i].querySelector(".b-main").click();
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /* 反覆點翻頁鈕直到頁碼變成目標值：頁面比畫面高時，前幾下是在同一頁內捲動 */
+  function flipUntil(doc, btnId, label, tries) {
+    tries = tries || 12;
+    var n = 0;
+    return (function step() {
+      if (doc.getElementById("read-chapter").textContent === label) return Promise.resolve(true);
+      if (n++ >= tries) return Promise.resolve(false);
+      doc.getElementById(btnId).click();
+      return wait(500).then(step);
+    })();
+  }
+
+  /* ================= 測試本體 ================= */
+
+  function run() {
+    var win, doc, spoken;
+
+    return wipe().then(loadApp).then(function (w) {
+      win = w; doc = win.document;
+      spoken = installSpeechStub(win);
+
+      /* ---------- 文字型 PDF ---------- */
+      return importFixture(win, "text_zh.pdf");
+    }).then(function () {
+      return bookNamed(win, "text_zh");
+    }).then(function (bk) {
+      ok(!!bk, "文字型 PDF 匯入成書架");
+      eq(bk.format, "pdf", "書本格式記成 pdf");
+      ok(bk.totalChars > 100, "有統計字數", bk && bk.totalChars);
+      ok(bk.chapterCount >= 1, "有章節數");
+
+      ok(openFromShelf(win, "text_zh"), "從書架點開文字型 PDF");
+      return until(function () {
+        return doc.querySelectorAll("#content .blk").length ? true : null;
+      }, "文字型 PDF 渲染出內容", 30000);
+    }).then(function () {
+      var text = doc.getElementById("content").textContent;
+      ok(text.indexOf("這是第一段") !== -1, "正文顯示在畫面上", text.slice(0, 120));
+      ok(text.indexOf("測試文件") !== -1, "標題顯示在畫面上");
+      ok(!/[⺀-⻳⼀-⿕]/.test(text), "畫面上沒有怪部首字");
+      ok(doc.querySelectorAll("#toc-list li").length >= 2, "目錄有多個章節",
+         doc.querySelectorAll("#toc-list li").length);
+      ok(!doc.body.classList.contains("page-mode"), "文字型 PDF 不是頁面檢視模式");
+      ok(doc.getElementById("play-btn").offsetParent !== null, "文字型 PDF 可以朗讀");
+
+      /* 從目錄跳到後面的章節 */
+      var tocItems = doc.querySelectorAll("#toc-list li");
+      tocItems[tocItems.length - 1].click();
+      return until(function () {
+        return doc.getElementById("content").textContent.indexOf("白日依山盡") !== -1 ? true : null;
+      }, "跳到最後一章", 10000);
+    }).then(function () {
+      ok(true, "目錄可以跳到 PDF 的後面章節");
+      doc.querySelectorAll("#toc-list li")[1].click();
+      return until(function () {
+        return doc.getElementById("content").textContent.indexOf("空山不見人") !== -1 ? true : null;
+      }, "跳到第一章", 10000);
+    }).then(function () {
+      ok(true, "PDF 的章節內容正確");
+
+      /* 朗讀（用語音替身） */
+      doc.getElementById("play-btn").click();
+      return until(function () { return spoken.length ? true : null; }, "文字型 PDF 開始朗讀", 8000);
+    }).then(function () {
+      ok(spoken.length > 0, "朗讀有送出句子");
+      ok(/[一-鿿]/.test(spoken[0].text), "送出的第一句是中文", spoken[0] && spoken[0].text);
+      win.RD.speech.stop();
+
+      /* 註解 */
+      doc.getElementById("add-annot-btn").click();
+      return until(function () {
+        return !doc.getElementById("sheet-annot-edit").classList.contains("hidden") ? true : null;
+      }, "註解編輯開啟", 8000);
+    }).then(function () {
+      doc.getElementById("annot-text").value = "在 PDF 上做的註解";
+      doc.getElementById("annot-save").click();
+      return until(function () {
+        return doc.querySelectorAll("#content .s.noted").length ? true : null;
+      }, "註解掛上去", 8000);
+    }).then(function () {
+      ok(true, "文字型 PDF 可以加註解");
+      doc.getElementById("back-btn").click();
+      return wait(200);
+    }).then(function () {
+
+      /* ---------- 掃描型 PDF ---------- */
+      return importFixture(win, "scan.pdf");
+    }).then(function () {
+      return bookNamed(win, "scan");
+    }).then(function (bk) {
+      ok(!!bk, "掃描型 PDF 匯入成書架");
+      eq(bk.format, "pdf-image", "書本格式記成 pdf-image");
+      eq(bk.pageCount, 3, "記下頁數");
+
+      ok(openFromShelf(win, "scan"), "從書架點開掃描型 PDF");
+      return until(function () {
+        var cv = doc.querySelector("#content .pdf-canvas");
+        return cv && cv.width > 10 && cv.height > 10 ? cv : null;
+      }, "掃描頁畫到 canvas 上", 40000);
+    }).then(function (cv) {
+      return until(function () {
+        return doc.getElementById("read-chapter").textContent === "第 1／3 頁" ? cv : null;
+      }, "頁碼更新成第一頁", 20000);
+    }).then(function (cv) {
+      ok(cv.width > 100 && cv.height > 100, "canvas 尺寸合理", cv.width + "x" + cv.height);
+      ok(doc.body.classList.contains("page-mode"), "進入頁面檢視模式");
+      ok(doc.getElementById("play-btn").offsetParent === null, "頁面模式收起朗讀鈕");
+      ok(doc.getElementById("add-annot-btn").offsetParent === null, "頁面模式收起加註解鈕");
+      ok(doc.getElementById("annots-btn").offsetParent === null, "頁面模式收起註解鈕");
+      eq(doc.getElementById("read-chapter").textContent, "第 1／3 頁", "顯示目前頁碼");
+      eq(doc.querySelectorAll("#toc-list li").length, 3, "目錄列出三頁");
+
+      /* 畫布真的有畫上東西（不是全白） */
+      var ctx = cv.getContext("2d");
+      var d = ctx.getImageData(0, 0, cv.width, Math.min(cv.height, 400)).data;
+      var dark = 0;
+      for (var i = 0; i < d.length; i += 4) { if (d[i] < 200) dark++; }
+      ok(dark > 50, "掃描頁的內容有畫出來（不是一片空白）", dark);
+
+      /* 翻頁：頁面比畫面高，前幾下是在同一頁內往下捲，捲到底才換頁 */
+      return flipUntil(doc, "next-page-btn", "第 2／3 頁");
+    }).then(function (done) {
+      ok(done, "下一頁可以翻到第二頁");
+      return flipUntil(doc, "next-page-btn", "第 3／3 頁");
+    }).then(function (done) {
+      ok(done, "可以翻到最後一頁");
+      return until(function () {
+        return /100%|9\d%/.test(doc.getElementById("progress-label").textContent) ? true : null;
+      }, "進度更新到最後一頁", 10000);
+    }).then(function () {
+      ok(true, "頁面模式的進度百分比會更新");
+      return flipUntil(doc, "prev-page-btn", "第 2／3 頁");
+    }).then(function (done) {
+      ok(done, "上一頁可以翻回去");
+      /* 從目錄跳頁 */
+      doc.getElementById("toc-btn").click();
+      return wait(150);
+    }).then(function () {
+      doc.querySelectorAll("#toc-list li")[0].click();
+      return until(function () {
+        return doc.getElementById("read-chapter").textContent === "第 1／3 頁" ? true : null;
+      }, "從目錄跳回第一頁", 20000);
+    }).then(function () {
+      ok(true, "目錄可以跳頁");
+      /* 跳到第三頁後重開 App，確認接續 */
+      doc.querySelectorAll("#toc-list li")[2].click();
+      return until(function () {
+        return doc.getElementById("read-chapter").textContent === "第 3／3 頁" ? true : null;
+      }, "跳到第三頁", 20000);
+    }).then(function () {
+      return wait(600);
+    }).then(function () {
+      return bookNamed(win, "scan");
+    }).then(function (bk) {
+      eq(bk.anchor.b, 2, "進度記成第三頁（錨點 b = 頁碼減一）");
+      return reloadApp();
+    }).then(function (w) {
+      win = w; doc = win.document;
+      return until(function () {
+        return doc.getElementById("read-chapter").textContent === "第 3／3 頁" ? true : null;
+      }, "重開後自動接回第三頁", 40000);
+    }).then(function () {
+      ok(true, "重開 App 自動接回上次那一頁");
+
+      /* 回書架再開文字型 PDF，確認兩種模式能互相切換 */
+      doc.getElementById("back-btn").click();
+      return wait(200);
+    }).then(function () {
+      ok(!doc.body.classList.contains("page-mode"), "回書架時離開頁面檢視模式");
+      ok(openFromShelf(win, "text_zh"), "再開文字型 PDF");
+      return until(function () {
+        return doc.querySelectorAll("#content .blk").length ? true : null;
+      }, "切回文字模式", 30000);
+    }).then(function () {
+      ok(!doc.body.classList.contains("page-mode"), "切回文字型 PDF 不是頁面模式");
+      ok(doc.getElementById("play-btn").offsetParent !== null, "朗讀鈕回來了");
+      ok(doc.querySelectorAll("#content .s.noted").length > 0, "先前的註解還在");
+    });
+  }
+
+  run().then(function () { flush("DONE"); })
+    .catch(function (e) {
+      fail++;
+      lines.push("[X] 測試中斷：" + (e && e.message ? e.message : e));
+      flush("DONE");
+    });
+})();
+</script>
+</body>
+</html>

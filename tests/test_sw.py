@@ -83,9 +83,15 @@ async def main():
                 await asyncio.sleep(0.5)
             ok(reg is True, "service worker 註冊並啟用", reg)
             names = [p.split("/")[-1] for p in (cached or [])]
-            for f in ["index.html", "app.js", "parse.js", "zip.js", "segment.js", "speech.js", "db.js",
-                      "style.css", "wake.mp4", "icon-192.png"]:
+            for f in ["index.html", "app.js", "parse.js", "pdfdoc.js", "zip.js", "segment.js",
+                      "speech.js", "db.js", "style.css", "wake.mp4", "icon-192.png"]:
                 ok(f in names, "已預先快取 " + f, names)
+            # pdf.js 很大（本體 + worker + 編碼表約 3.3 MB），刻意不進預先快取，
+            # 開 PDF 時才動態載入，之後由執行期快取留住。
+            for f in ["pdf.min.mjs", "pdf.worker.min.mjs"]:
+                ok(f not in names, "pdf.js 刻意不進預先快取：" + f, names)
+            ok(not any("/cmaps/" in p for p in (cached or [])),
+               "中日韓編碼表也不進預先快取", cached)
 
             await send("Network.emulateNetworkConditions", {
                 "offline": True, "latency": 0, "downloadThroughput": 0, "uploadThroughput": 0})

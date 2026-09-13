@@ -329,3 +329,18 @@ input[type="file"] { position: absolute; width: 1px; height: 1px; opacity: 0; po
 
 /* 點畫面中央收起工具列，讓整頁都是文字 */
 body.chrome-off .read-bar { display: none; }
+
+/* ---------- 掃描型 PDF 的頁面檢視 ---------- */
+
+.pdf-canvas {
+  display: block;
+  margin: 0 auto;
+  max-width: 100%;
+  background: #fff;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, .18);
+}
+
+/* 這個模式沒有文字層，朗讀與註解按鈕直接收起來，不留下按了沒反應的按鈕 */
+body.page-mode #play-btn,
+body.page-mode #add-annot-btn,
+body.page-mode #annots-btn { display: none; }
