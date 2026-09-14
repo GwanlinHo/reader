@@ -103,6 +103,43 @@
     return spoken;
   }
 
+  /* ---------- 螢幕常亮替身 ---------- */
+
+  /* 假 Wake Lock：記錄要了幾次、手上的鎖；fire() 模擬系統收回。
+     假影片：headless 不一定能播 mp4，paused 是唯讀 getter 要用 defineProperty 蓋。 */
+  function installWakeStub(win) {
+    var w = { requests: 0, locks: [] };
+    function Lock() {
+      var self = this, handlers = [];
+      this.released = false;
+      this.addEventListener = function (ev, fn) { if (ev === "release") handlers.push(fn); };
+      this.fire = function () {
+        if (self.released) return;
+        self.released = true;
+        handlers.forEach(function (fn) { fn({}); });
+      };
+      this.release = function () { self.fire(); return Promise.resolve(); };
+    }
+    Object.defineProperty(win.navigator, "wakeLock", {
+      configurable: true,
+      value: { request: function () { w.requests++; var l = new Lock(); w.locks.push(l); return Promise.resolve(l); } }
+    });
+    w.held = function () { return w.locks.filter(function (l) { return !l.released; }).length; };
+    var v = win.document.getElementById("wake-video");
+    var playing = false;
+    v.play = function () { playing = true; return Promise.resolve(); };
+    v.pause = function () { playing = false; };
+    Object.defineProperty(v, "paused", { configurable: true, get: function () { return !playing; } });
+    w.video = v;
+    w.systemPauseVideo = function () { playing = false; };
+    return w;
+  }
+
+  function setVisibility(win, st) {
+    Object.defineProperty(win.document, "visibilityState", { configurable: true, get: function () { return st; } });
+    win.document.dispatchEvent(new win.Event("visibilitychange"));
+  }
+
   /* ---------- 匯入檔案 ---------- */
 
   function importFixture(win, name, type) {
@@ -136,7 +173,7 @@
 
   /* ---------- 測試流程 ---------- */
 
-  var win, spoken;
+  var win, spoken, wake, wakeReq0;
 
   wipe().then(loadApp).then(function (w) {
     win = w;
@@ -323,11 +360,21 @@
     var doc = win.document;
     ok(/卷一/.test(doc.getElementById("read-chapter").textContent), "epub 章節名稱來自目錄");
     spoken = installSpeechStub(win);
+    wake = installWakeStub(win);
     doc.getElementById("play-btn").click();
     return until(function () { return spoken.length >= 6 ? true : null; }, "朗讀開始並持續推進", 20000);
   }).then(function () {
     var doc = win.document;
     ok(spoken.length >= 6, "朗讀有連續送出多段（" + spoken.length + " 段）");
+    var wi = win.RD.speech.wakeInfo();
+    info("螢幕常亮：" + JSON.stringify(wi) + "，說明：" + doc.getElementById("wake-note").textContent);
+    eq(wi.state, "lock", "朗讀中取得 Wake Lock");
+    ok(wi.lock && wi.video, "Wake Lock 取得後無聲影片仍持續播放（兩層同時頂著）");
+    eq(wake.held(), 1, "同時只握一把 Wake Lock");
+    ok(wake.video.classList.contains("on"), "備援影片有實際尺寸（class on）");
+    ok(/Wake Lock 生效中/.test(doc.getElementById("wake-note").textContent) &&
+       /無聲影片播放中/.test(doc.getElementById("wake-note").textContent), "設定面板顯示即時狀態");
+    wakeReq0 = wake.requests;
     var texts = spoken.map(function (s) { return s.text; });
     var joined = texts.join(" | ");
     info("前八段：" + texts.slice(0, 8).join(" / "));
@@ -337,6 +384,33 @@
     return until(function () { return spoken.some(function (s) { return /PWA/.test(s.text); }) ? true : null; }, "朗讀自動跨到第二章", 25000);
   }).then(function () {
     ok(true, "朗讀跑完一章會自動接下一章");
+    return until(function () { return wake.requests > wakeReq0 ? true : null; }, "換章時重要 Wake Lock", 3000).then(function () {
+      ok(true, "換章時重新要一次 Wake Lock（" + wakeReq0 + " -> " + wake.requests + "）");
+      eq(wake.held(), 1, "換章換鎖後舊的已放掉，仍只握一把");
+      ok(win.RD.speech.wakeInfo().lock, "換章後 Wake Lock 仍在");
+    });
+  }).then(function () {
+    /* 模擬沒離開畫面卻被系統收回，且影片被暫停：回前景（或定期檢查）要補回兩層 */
+    wake.locks.forEach(function (l) { l.fire(); });
+    wake.systemPauseVideo();
+    eq(win.RD.speech.wakeInfo().lock, false, "系統收回後狀態反映 Wake Lock 已失效");
+    setVisibility(win, "hidden");
+    ok(wake.held() === 0, "背景時不去要 Wake Lock");
+    setVisibility(win, "visible");
+    return until(function () { var i = win.RD.speech.wakeInfo(); return i.lock && i.video ? true : null; }, "回前景補回螢幕常亮", 3000);
+  }).then(function () {
+    ok(true, "回前景後 Wake Lock 與無聲影片都補回來");
+    eq(wake.held(), 1, "補回後仍只握一把");
+    /* 關掉設定就立刻放掉，再打開就立刻補回 */
+    var doc = win.document;
+    var cb = doc.getElementById("keep-awake");
+    cb.checked = false; cb.dispatchEvent(new win.Event("change"));
+    var i1 = win.RD.speech.wakeInfo();
+    ok(i1.state === "off" && !i1.lock && !i1.video && wake.held() === 0, "朗讀中關閉螢幕常亮會立刻放掉兩層", JSON.stringify(i1));
+    cb.checked = true; cb.dispatchEvent(new win.Event("change"));
+    return until(function () { return win.RD.speech.wakeInfo().lock ? true : null; }, "重新打開螢幕常亮", 3000);
+  }).then(function () {
+    ok(win.RD.speech.wakeInfo().video, "重新打開螢幕常亮後影片也恢復");
     /* 等英文那一句真的唸到，再檢查語言分派 */
     return until(function () {
       return spoken.some(function (s) { return /quick brown fox/.test(s.text); }) ? true : null;
@@ -361,6 +435,9 @@
       var n2 = spoken.length;
       return wait(400).then(function () {
         ok(spoken.length === n2, "停止後不再送出新段落（停止時 " + n + "，之後 " + spoken.length + "）");
+        var wi = win.RD.speech.wakeInfo();
+        ok(wi.state === "idle" && !wi.lock && !wi.video && wake.held() === 0 &&
+           !wake.video.classList.contains("on"), "停止後放掉 Wake Lock 並收起影片", JSON.stringify(wi));
         eq(doc.querySelectorAll("#content .s.on").length, 0, "停止後清掉高亮");
       });
     });

@@ -1167,6 +1167,26 @@
     RD.speech.play(items);
   }
 
+  /* 設定面板的螢幕常亮說明：朗讀中顯示即時狀態，方便在手機上判斷是哪一層在作用 */
+  function updateWakeNote(info) {
+    if (!el.wakeNote || !info) return;
+    var text;
+    if (info.state === "off") text = "已關閉螢幕常亮。";
+    else if (info.state === "idle") {
+      text = info.supported
+        ? "朗讀期間同時使用 Wake Lock 與無聲影片維持螢幕常亮。"
+        : "本裝置不支援 Wake Lock，朗讀期間用無聲影片維持螢幕常亮。";
+    } else if (info.state === "failed") {
+      text = "目前狀態：無法維持螢幕常亮，請把系統的自動鎖定時間調長。";
+    } else {
+      text = "目前狀態：" + [
+        info.lock ? "Wake Lock 生效中" : (info.supported ? "Wake Lock 未取得" : "不支援 Wake Lock"),
+        info.video ? "無聲影片播放中" : "無聲影片未播放"
+      ].join("／") + "。";
+    }
+    el.wakeNote.textContent = text;
+  }
+
   /* ---------- 備份 ---------- */
 
   function exportBackup() {
@@ -1331,7 +1351,11 @@
     });
     el.voiceZh.addEventListener("change", function () { settings.voiceZh = el.voiceZh.value; saveSettings(); });
     el.voiceEn.addEventListener("change", function () { settings.voiceEn = el.voiceEn.value; saveSettings(); });
-    el.keepAwake.addEventListener("change", function () { settings.keepAwake = el.keepAwake.checked; saveSettings(); });
+    el.keepAwake.addEventListener("change", function () {
+      settings.keepAwake = el.keepAwake.checked;
+      saveSettings();
+      RD.speech.applyWakeSetting();
+    });
     el.edgeTap.addEventListener("change", function () { settings.edgeTap = el.edgeTap.checked; saveSettings(); });
     $("voice-test").addEventListener("click", testVoices);
     $("export-btn").addEventListener("click", exportBackup);
@@ -1461,6 +1485,7 @@
       onState: updatePlayButton,
       onStatus: function (m) { if (m) setStatus(m); },
       onEnd: function () { setStatus("朗讀完畢"); },
+      onWake: updateWakeNote,
       settings: function () {
         return {
           rate: settings.rate,
@@ -1471,9 +1496,7 @@
       }
     });
     RD.speech.onVoices(fillVoiceSelects);
-    el.wakeNote.textContent = RD.speech.wakeInfo().supported
-      ? "本裝置支援 Wake Lock，朗讀期間會直接阻止螢幕自動關閉。"
-      : "本裝置不支援 Wake Lock，朗讀期間改用無聲影片維持螢幕常亮。";
+    updateWakeNote(RD.speech.wakeInfo());
     if (!RD.speech.available()) {
       el.voiceNote.textContent = "此瀏覽器不支援語音朗讀。";
     }

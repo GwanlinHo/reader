@@ -4,7 +4,7 @@
  *   - speechEpoch 世代機制（停止／換書時徹底中斷舊佇列）
  *   - 逾時保護（少數環境不回報 onend）
  *   - 指定語音失敗時降級成只給 lang（Android 常見）
- *   - Wake Lock，取不到時用無聲影片備援（iOS 唯一可行）
+ *   - 螢幕常亮：Wake Lock 與無聲影片兩層同時頂著，定期檢查、換章、回前景都會補回
  * 本檔的差異：中英兩組語音各自獨立挑選，佇列項目以「語言片段」為單位。
  * 背景／鎖屏會被瀏覽器暫停語音，這點網頁繞不過，只能靠螢幕常亮 + 回前景自動接續。
  */
@@ -18,6 +18,7 @@
     onState: null,        /* function(state) state: 'idle'|'playing'|'paused' */
     onStatus: null,       /* function(text) 狀態列訊息 */
     onEnd: null,          /* function() 全部唸完 */
+    onWake: null,         /* function(info) 螢幕常亮狀態改變 */
     settings: null        /* function() -> { rate, voiceZh, voiceEn, keepAwake } */
   };
 
@@ -169,45 +170,44 @@
 
   /* ---------- 螢幕常亮 ---------- */
 
+  /* 兩層同時頂著，而不是二選一：
+   *   1. 無聲循環影片：朗讀期間一直播，取得 Wake Lock 也不收掉。
+   *      iOS 主畫面 PWA 在部分版本 Wake Lock 會回報成功卻沒有作用，也可能中途失效而不通知，
+   *      只靠 Wake Lock 就會在「沒離開畫面」的情況下照樣暗掉。
+   *   2. Wake Lock：換章時重新要一次；定期檢查被收回就補要；回前景重要。
+   * 影片狀態一律看 video.paused，不另外記旗標——在背景被系統暫停時不會有人通知我們。 */
+
   var wakeLock = null;
-  var wakeVideoOn = false;
-  var wakeState = "idle";
+  var wakePending = false;
+  var wakeState = "idle";   /* idle | lock | video | failed | off */
+  var videoGen = 0;         /* 讓舊的 play() 結果不會蓋掉新的狀態 */
 
   function wakeSupported() { return "wakeLock" in navigator; }
+  function pageVisible() { return document.visibilityState !== "hidden"; }
+  function wakeWanted() { return state.playing && conf().keepAwake; }
 
-  function requestWake() {
-    if (!conf().keepAwake) { wakeState = "off"; return; }
-    /* 先在手勢當下把備援影片播起來，Wake Lock 成功再收掉 */
-    startWakeVideo();
-    wakeState = wakeVideoOn ? "video" : "failed";
-    if (!wakeSupported()) return;
-    try {
-      navigator.wakeLock.request("screen").then(function (lock) {
-        wakeLock = lock;
-        lock.addEventListener("release", function () {
-          wakeLock = null;
-          if (state.playing && conf().keepAwake) {
-            startWakeVideo();
-            wakeState = wakeVideoOn ? "video" : "failed";
-          }
-        });
-        stopWakeVideo();
-        wakeState = "lock";
-      }).catch(function () { /* 維持影片備援 */ });
-    } catch (e) { /* 維持影片備援 */ }
+  function wakeVideo() { return document.getElementById("wake-video"); }
+
+  function videoPlaying() {
+    var v = wakeVideo();
+    return !!(v && v.classList.contains("on") && !v.paused);
   }
 
-  function releaseWake() {
-    try {
-      if (wakeLock) { wakeLock.release(); wakeLock = null; }
-    } catch (e) { /* 忽略 */ }
-    stopWakeVideo();
-    wakeState = "idle";
+  function refreshWakeState() {
+    var s;
+    if (!conf().keepAwake) s = "off";
+    else if (!state.playing) s = "idle";
+    else if (wakeLock) s = "lock";
+    else if (videoPlaying()) s = "video";
+    else s = "failed";
+    wakeState = s;
+    if (opts.onWake) opts.onWake(wakeInfo());
   }
 
   function startWakeVideo() {
-    var v = document.getElementById("wake-video");
-    if (!v || wakeVideoOn) return;
+    var v = wakeVideo();
+    if (!v || videoPlaying()) return;
+    var gen = ++videoGen;
     try {
       if (!v.getAttribute("src")) v.setAttribute("src", "wake.mp4");
       v.muted = true;
@@ -215,29 +215,95 @@
       v.playsInline = true;
       v.classList.add("on");   /* 必須有實際尺寸，iOS 才認定影片在播放 */
       var pr = v.play();
-      if (pr && pr.catch) {
-        pr.catch(function () {
+      if (pr && pr.then) {
+        pr.then(function () {
+          if (gen === videoGen) refreshWakeState();
+        }, function () {
+          if (gen !== videoGen) return;
           v.classList.remove("on");
-          wakeVideoOn = false;
-          if (!wakeLock) wakeState = state.playing ? "failed" : "idle";
+          refreshWakeState();
         });
       }
-      wakeVideoOn = true;
-    } catch (e) { wakeVideoOn = false; }
+    } catch (e) {
+      v.classList.remove("on");
+    }
   }
 
   function stopWakeVideo() {
-    var v = document.getElementById("wake-video");
+    var v = wakeVideo();
     if (!v) return;
+    videoGen++;
     try { v.pause(); } catch (e) { /* 忽略 */ }
     v.classList.remove("on");
-    wakeVideoOn = false;
+  }
+
+  /* renew=true：已經有鎖也重要一把新的，拿到後才放掉舊的（換章時用） */
+  function requestWakeLock(renew) {
+    if (!wakeSupported() || wakePending || !pageVisible()) return;
+    if (wakeLock && !renew) return;
+    wakePending = true;
+    try {
+      navigator.wakeLock.request("screen").then(function (lock) {
+        wakePending = false;
+        if (!wakeWanted()) {
+          try { lock.release(); } catch (e) { /* 忽略 */ }
+          refreshWakeState();
+          return;
+        }
+        var old = wakeLock;
+        wakeLock = lock;
+        lock.addEventListener("release", function () {
+          /* 系統收回（切背景、省電）；前景時由定期檢查補要，避免被連續收回時無限重試 */
+          if (wakeLock === lock) wakeLock = null;
+          refreshWakeState();
+        });
+        if (old) { try { old.release(); } catch (e) { /* 忽略 */ } }
+        refreshWakeState();
+      }, function () {
+        wakePending = false;
+        refreshWakeState();
+      });
+    } catch (e) {
+      wakePending = false;
+    }
+  }
+
+  /* 按下朗讀的手勢當下呼叫：影片一定要在手勢裡先播起來 */
+  function requestWake() {
+    if (!conf().keepAwake) { releaseWake(); return; }
+    startWakeVideo();
+    requestWakeLock(false);
+    refreshWakeState();
+  }
+
+  /* 朗讀期間定期與回前景時呼叫：哪一層掉了就補哪一層 */
+  function ensureWake() {
+    if (!wakeWanted() || !pageVisible()) return;
+    startWakeVideo();
+    requestWakeLock(false);
+    refreshWakeState();
+  }
+
+  function releaseWake() {
+    var lock = wakeLock;
+    wakeLock = null;
+    try { if (lock) lock.release(); } catch (e) { /* 忽略 */ }
+    stopWakeVideo();
+    refreshWakeState();
+  }
+
+  /* 設定面板切換「保持螢幕常亮」時呼叫 */
+  function applyWakeSetting() {
+    if (wakeWanted()) requestWake();
+    else releaseWake();
   }
 
   function wakeInfo() {
     return {
       state: wakeState,
-      supported: wakeSupported()
+      supported: wakeSupported(),
+      lock: !!wakeLock,
+      video: videoPlaying()
     };
   }
 
@@ -290,11 +356,12 @@
     state.pos = 0;
     startAudioKeepAlive();
     requestWake();
-    /* 部分瀏覽器十幾秒後會自行暫停，定期 resume 頂著 */
+    /* 部分瀏覽器十幾秒後會自行暫停，定期 resume 頂著；順便補回掉了的螢幕常亮 */
     state.resumeTimer = setInterval(function () {
       if (state.playing && !state.paused) {
         try { window.speechSynthesis.resume(); } catch (e) { /* 忽略 */ }
       }
+      ensureWake();
     }, 10000);
     setState();
     next(state.epoch);
@@ -308,6 +375,8 @@
       if (more && more.length) {
         state.queue = more.slice();
         state.pos = 0;
+        /* 一路唸下去不會再經過 play()，換章時主動換一把新的 Wake Lock */
+        if (conf().keepAwake) { startWakeVideo(); requestWakeLock(true); }
       } else {
         state.playing = false;
         stop();
@@ -396,6 +465,8 @@
       }
       return;
     }
+    /* 背景時系統會收回 Wake Lock、暫停影片，回前景一律補回（暫停中也算在朗讀） */
+    ensureWake();
     if (state.pendingResume && state.playing) {
       state.pendingResume = false;
       state.epoch++;
@@ -422,6 +493,7 @@
     isActive: isActive,
     currentItem: currentItem,
     wakeInfo: wakeInfo,
+    applyWakeSetting: applyWakeSetting,
     normLang: normLang
   };
 })();
