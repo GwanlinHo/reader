@@ -311,22 +311,6 @@ input[type="file"] { position: absolute; width: 1px; height: 1px; opacity: 0; po
 .bullets { font-size: 0.9rem; line-height: 1.8; padding-left: 1.3em; margin: 8px 0; }
 .bullets li { margin-bottom: 6px; }
 
-/* 螢幕常亮備援影片：iOS 會忽略 0 尺寸或 display:none 的影片，
- * 所以走備援時必須留下實際可見的尺寸。 */
-.wake-video {
-  display: none;
-  position: fixed;
-  right: 6px;
-  bottom: calc(6px + env(safe-area-inset-bottom));
-  width: 20px;
-  height: 12px;
-  border-radius: 3px;
-  opacity: 0.45;
-  z-index: 60;
-  pointer-events: none;
-}
-.wake-video.on { display: block; }
-
 /* 點畫面中央收起工具列，讓整頁都是文字 */
 body.chrome-off .read-bar { display: none; }
 

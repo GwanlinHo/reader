@@ -84,7 +84,7 @@ async def main():
             ok(reg is True, "service worker 註冊並啟用", reg)
             names = [p.split("/")[-1] for p in (cached or [])]
             for f in ["index.html", "app.js", "parse.js", "pdfdoc.js", "zip.js", "segment.js",
-                      "speech.js", "db.js", "style.css", "wake.mp4", "icon-192.png"]:
+                      "speech.js", "db.js", "style.css", "icon-192.png"]:
                 ok(f in names, "已預先快取 " + f, names)
             # pdf.js 很大（本體 + worker + 編碼表約 3.3 MB），刻意不進預先快取，
             # 開 PDF 時才動態載入，之後由執行期快取留住。

@@ -1164,25 +1164,26 @@
         if (say) items.push({ say: say, lang: r.lang, b: -1, o: -1 });
       });
     });
-    RD.speech.play(items);
+    /* once：試聽唸完就停，不要接著唸書（在書架上沒開書時也不會去取下一章） */
+    RD.speech.play(items, { once: true });
   }
 
-  /* 設定面板的螢幕常亮說明：朗讀中顯示即時狀態，方便在手機上判斷是哪一層在作用 */
+  /* 設定面板的螢幕常亮說明：朗讀中顯示即時狀態，方便在手機上判斷 */
+  var WAKE_TEXT = {
+    off: "已關閉螢幕常亮。",
+    lock: "目前狀態：Wake Lock 生效中，螢幕不會自動關閉。",
+    pending: "目前狀態：正在取得 Wake Lock…",
+    failed: "目前狀態：Wake Lock 取得失敗，會每 10 秒重試；也可以把系統的自動鎖定時間調長。",
+    unsupported: "本裝置不支援 Wake Lock，朗讀時請把系統的自動鎖定時間調長。"
+  };
+
   function updateWakeNote(info) {
     if (!el.wakeNote || !info) return;
-    var text;
-    if (info.state === "off") text = "已關閉螢幕常亮。";
-    else if (info.state === "idle") {
+    var text = WAKE_TEXT[info.state];
+    if (!text) {
       text = info.supported
-        ? "朗讀期間同時使用 Wake Lock 與無聲影片維持螢幕常亮。"
-        : "本裝置不支援 Wake Lock，朗讀期間用無聲影片維持螢幕常亮。";
-    } else if (info.state === "failed") {
-      text = "目前狀態：無法維持螢幕常亮，請把系統的自動鎖定時間調長。";
-    } else {
-      text = "目前狀態：" + [
-        info.lock ? "Wake Lock 生效中" : (info.supported ? "Wake Lock 未取得" : "不支援 Wake Lock"),
-        info.video ? "無聲影片播放中" : "無聲影片未播放"
-      ].join("／") + "。";
+        ? "朗讀期間用 Wake Lock 阻止螢幕自動關閉。"
+        : WAKE_TEXT.unsupported;
     }
     el.wakeNote.textContent = text;
   }

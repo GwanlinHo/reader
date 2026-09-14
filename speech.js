@@ -4,7 +4,7 @@
  *   - speechEpoch 世代機制（停止／換書時徹底中斷舊佇列）
  *   - 逾時保護（少數環境不回報 onend）
  *   - 指定語音失敗時降級成只給 lang（Android 常見）
- *   - 螢幕常亮：Wake Lock 與無聲影片兩層同時頂著，定期檢查、換章、回前景都會補回
+ *   - 螢幕常亮：Wake Lock，定期檢查、換章、回前景都會補回
  * 本檔的差異：中英兩組語音各自獨立挑選，佇列項目以「語言片段」為單位。
  * 背景／鎖屏會被瀏覽器暫停語音，這點網頁繞不過，只能靠螢幕常亮 + 回前景自動接續。
  */
@@ -13,7 +13,7 @@
   var RD = (window.RD = window.RD || {});
 
   var opts = {
-    fetchMore: null,      /* function() -> [item] | null，佇列用完時取下一批（換章） */
+    fetchMore: null,      /* function() -> [item] | null，佇列用完時取下一批（換章）；play(items, { once: true }) 不取 */
     onSpeak: null,        /* function(item) 開始唸某段時 */
     onState: null,        /* function(state) state: 'idle'|'playing'|'paused' */
     onStatus: null,       /* function(text) 狀態列訊息 */
@@ -170,74 +170,33 @@
 
   /* ---------- 螢幕常亮 ---------- */
 
-  /* 兩層同時頂著，而不是二選一：
-   *   1. 無聲循環影片：朗讀期間一直播，取得 Wake Lock 也不收掉。
-   *      iOS 主畫面 PWA 在部分版本 Wake Lock 會回報成功卻沒有作用，也可能中途失效而不通知，
-   *      只靠 Wake Lock 就會在「沒離開畫面」的情況下照樣暗掉。
-   *   2. Wake Lock：換章時重新要一次；定期檢查被收回就補要；回前景重要。
-   * 影片狀態一律看 video.paused，不另外記旗標——在背景被系統暫停時不會有人通知我們。 */
+  /* 只用 Wake Lock。不用無聲影片備援：WebKit（HTMLMediaElement::shouldDisableSleep）
+   * 對設了 loop 或沒有音軌的影片不會阻止休眠，那種備援在 iOS 從來沒有效果。
+   * WebKit 規則：同一頁面第一次要求必須在使用者手勢當下，成功過一次之後就不需要手勢；
+   * 頁面進背景時所有鎖都會被收回。所以按朗讀時先要一次，之後換章換新鎖、
+   * 每 10 秒檢查、回前景時補回。 */
 
   var wakeLock = null;
   var wakePending = false;
-  var wakeState = "idle";   /* idle | lock | video | failed | off */
-  var videoGen = 0;         /* 讓舊的 play() 結果不會蓋掉新的狀態 */
+  var wakeState = "idle";   /* idle | lock | pending | failed | unsupported | off */
 
   function wakeSupported() { return "wakeLock" in navigator; }
   function pageVisible() { return document.visibilityState !== "hidden"; }
   function wakeWanted() { return state.playing && conf().keepAwake; }
 
-  function wakeVideo() { return document.getElementById("wake-video"); }
-
-  function videoPlaying() {
-    var v = wakeVideo();
-    return !!(v && v.classList.contains("on") && !v.paused);
-  }
-
   function refreshWakeState() {
     var s;
     if (!conf().keepAwake) s = "off";
     else if (!state.playing) s = "idle";
+    else if (!wakeSupported()) s = "unsupported";
     else if (wakeLock) s = "lock";
-    else if (videoPlaying()) s = "video";
+    else if (wakePending) s = "pending";
     else s = "failed";
     wakeState = s;
     if (opts.onWake) opts.onWake(wakeInfo());
   }
 
-  function startWakeVideo() {
-    var v = wakeVideo();
-    if (!v || videoPlaying()) return;
-    var gen = ++videoGen;
-    try {
-      if (!v.getAttribute("src")) v.setAttribute("src", "wake.mp4");
-      v.muted = true;
-      v.loop = true;
-      v.playsInline = true;
-      v.classList.add("on");   /* 必須有實際尺寸，iOS 才認定影片在播放 */
-      var pr = v.play();
-      if (pr && pr.then) {
-        pr.then(function () {
-          if (gen === videoGen) refreshWakeState();
-        }, function () {
-          if (gen !== videoGen) return;
-          v.classList.remove("on");
-          refreshWakeState();
-        });
-      }
-    } catch (e) {
-      v.classList.remove("on");
-    }
-  }
-
-  function stopWakeVideo() {
-    var v = wakeVideo();
-    if (!v) return;
-    videoGen++;
-    try { v.pause(); } catch (e) { /* 忽略 */ }
-    v.classList.remove("on");
-  }
-
-  /* renew=true：已經有鎖也重要一把新的，拿到後才放掉舊的（換章時用） */
+  /* renew=true：已經有鎖也要一把新的，拿到後才放掉舊的（換章時用） */
   function requestWakeLock(renew) {
     if (!wakeSupported() || wakePending || !pageVisible()) return;
     if (wakeLock && !renew) return;
@@ -268,18 +227,9 @@
     }
   }
 
-  /* 按下朗讀的手勢當下呼叫：影片一定要在手勢裡先播起來 */
-  function requestWake() {
-    if (!conf().keepAwake) { releaseWake(); return; }
-    startWakeVideo();
-    requestWakeLock(false);
-    refreshWakeState();
-  }
-
-  /* 朗讀期間定期與回前景時呼叫：哪一層掉了就補哪一層 */
+  /* 按下朗讀、定期檢查、回前景時呼叫：鎖掉了就補回 */
   function ensureWake() {
-    if (!wakeWanted() || !pageVisible()) return;
-    startWakeVideo();
+    if (!wakeWanted()) { refreshWakeState(); return; }
     requestWakeLock(false);
     refreshWakeState();
   }
@@ -288,13 +238,12 @@
     var lock = wakeLock;
     wakeLock = null;
     try { if (lock) lock.release(); } catch (e) { /* 忽略 */ }
-    stopWakeVideo();
     refreshWakeState();
   }
 
   /* 設定面板切換「保持螢幕常亮」時呼叫 */
   function applyWakeSetting() {
-    if (wakeWanted()) requestWake();
+    if (wakeWanted()) ensureWake();
     else releaseWake();
   }
 
@@ -302,8 +251,7 @@
     return {
       state: wakeState,
       supported: wakeSupported(),
-      lock: !!wakeLock,
-      video: videoPlaying()
+      lock: !!wakeLock
     };
   }
 
@@ -319,6 +267,7 @@
     resumeTimer: null,
     pauseTimer: null,
     pendingResume: false,
+    once: false,          /* 只唸這一批，唸完不接下一章（試聽用） */
     voiceFallback: false
   };
 
@@ -345,7 +294,7 @@
   }
 
   /* items: [{ say, disp, lang, b, o, len } | { pause: ms }] */
-  function play(items) {
+  function play(items, options) {
     if (!available()) { setStatus("此瀏覽器不支援語音朗讀"); return false; }
     stop();
     if (!items || !items.length) { setStatus("沒有可朗讀的內容"); return false; }
@@ -354,8 +303,9 @@
     state.paused = false;
     state.queue = items.slice();
     state.pos = 0;
+    state.once = !!(options && options.once);
     startAudioKeepAlive();
-    requestWake();
+    ensureWake();
     /* 部分瀏覽器十幾秒後會自行暫停，定期 resume 頂著；順便補回掉了的螢幕常亮 */
     state.resumeTimer = setInterval(function () {
       if (state.playing && !state.paused) {
@@ -371,12 +321,12 @@
   function next(epoch) {
     if (epoch !== state.epoch || !state.playing) return;
     if (state.pos >= state.queue.length) {
-      var more = opts.fetchMore ? opts.fetchMore() : null;
+      var more = (opts.fetchMore && !state.once) ? opts.fetchMore() : null;
       if (more && more.length) {
         state.queue = more.slice();
         state.pos = 0;
         /* 一路唸下去不會再經過 play()，換章時主動換一把新的 Wake Lock */
-        if (conf().keepAwake) { startWakeVideo(); requestWakeLock(true); }
+        if (conf().keepAwake) requestWakeLock(true);
       } else {
         state.playing = false;
         stop();

@@ -14,7 +14,6 @@ const ASSETS = [
   './speech.js',
   './app.js',
   './manifest.webmanifest',
-  './wake.mp4',
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/icon-maskable-512.png',
