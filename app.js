@@ -19,6 +19,15 @@
     { key: "sans", label: "黑體", css: 'system-ui, -apple-system, "Noto Sans CJK TC", "PingFang TC", "Microsoft JhengHei", sans-serif' },
     { key: "serif", label: "明體", css: '"Noto Serif CJK TC", "Songti TC", "Source Han Serif TC", "PMingLiU", Georgia, serif' }
   ];
+  /* 翻頁手勢：點畫面的哪裡會翻頁。上下模式是為了單手操作（拇指按得到下半部）。 */
+  var TAP_MODES = [
+    { key: "off", label: "關閉" },
+    { key: "edge", label: "左右邊緣" },
+    { key: "updown", label: "上下區域" }
+  ];
+  var TAP_EDGE = 0.25;     /* 左右模式：兩側各 25% */
+  var TAP_BAND = 0.35;     /* 上下模式：上下各 35%，中間 30% 收工具列 */
+
   var THEMES = [
     { key: "paper", label: "米黃" },
     { key: "light", label: "日" },
@@ -31,7 +40,7 @@
 
   var settings = {
     font: 2, line: 2, family: "sans", theme: "paper",
-    rate: 1, voiceZh: "", voiceEn: "", keepAwake: true, edgeTap: true,
+    rate: 1, voiceZh: "", voiceEn: "", keepAwake: true, tapMode: "edge",
     lastBook: ""
   };
 
@@ -68,7 +77,8 @@
       if (typeof s.voiceZh === "string") settings.voiceZh = s.voiceZh;
       if (typeof s.voiceEn === "string") settings.voiceEn = s.voiceEn;
       settings.keepAwake = s.keepAwake !== false;
-      settings.edgeTap = s.edgeTap !== false;
+      if (TAP_MODES.some(function (m) { return m.key === s.tapMode; })) settings.tapMode = s.tapMode;
+      else if (typeof s.edgeTap === "boolean") settings.tapMode = s.edgeTap ? "edge" : "off";   /* 舊版設定轉換 */
       if (typeof s.lastBook === "string") settings.lastBook = s.lastBook;
     } catch (e) { /* 設定壞掉就用預設 */ }
   }
@@ -94,7 +104,6 @@
       el.rateVal.textContent = settings.rate.toFixed(2) + " 倍";
     }
     if (el.keepAwake) el.keepAwake.checked = settings.keepAwake;
-    if (el.edgeTap) el.edgeTap.checked = settings.edgeTap;
     markSegs();
   }
 
@@ -821,6 +830,18 @@
     return mark.getBoundingClientRect().bottom <= c.getBoundingClientRect().bottom + 4;
   }
 
+  /* 點擊位置（0~1 的相對座標）換成翻頁方向：-1 上一頁、1 下一頁、0 不翻頁（收工具列） */
+  function tapDir(mode, relX, relY) {
+    if (mode === "edge") {
+      if (relX < TAP_EDGE) return -1;
+      if (relX > 1 - TAP_EDGE) return 1;
+    } else if (mode === "updown") {
+      if (relY < TAP_BAND) return -1;
+      if (relY > 1 - TAP_BAND) return 1;
+    }
+    return 0;
+  }
+
   function pageBy(dir) {
     if (cur.pdfPage) { pdfFlip(dir); return; }
     var c = el.content;
@@ -1092,6 +1113,9 @@
       var a = cur.doc ? currentAnchor() : null;
       settings.family = FAMILIES[i].key; saveSettings(); applySettings(); keepAnchorAfterRelayout(a);
     });
+    fillSeg(el.tapGroup, TAP_MODES.map(function (m) { return m.label; }), function (i) {
+      settings.tapMode = TAP_MODES[i].key; saveSettings(); markSegs();
+    });
     fillSeg(el.themeGroup, THEMES.map(function (t) { return t.label; }), function (i) {
       settings.theme = THEMES[i].key; saveSettings(); applySettings();
     });
@@ -1110,6 +1134,7 @@
   }
 
   function markSegs() {
+    mark(el.tapGroup, TAP_MODES.map(function (m) { return m.key; }).indexOf(settings.tapMode));
     mark(el.fontGroup, settings.font);
     mark(el.lineGroup, settings.line);
     mark(el.familyGroup, FAMILIES.map(function (f) { return f.key; }).indexOf(settings.family));
@@ -1357,7 +1382,6 @@
       saveSettings();
       RD.speech.applyWakeSetting();
     });
-    el.edgeTap.addEventListener("change", function () { settings.edgeTap = el.edgeTap.checked; saveSettings(); });
     $("voice-test").addEventListener("click", testVoices);
     $("export-btn").addEventListener("click", exportBackup);
     el.importJson.addEventListener("change", function () {
@@ -1416,9 +1440,10 @@
       var sel = window.getSelection && window.getSelection();
       if (sel && sel.toString().trim()) return;
       var r = el.content.getBoundingClientRect();
-      var rel = (e.clientX - r.left) / r.width;
-      if (settings.edgeTap && rel < 0.25) pageBy(-1);
-      else if (settings.edgeTap && rel > 0.75) pageBy(1);
+      var dir = tapDir(settings.tapMode,
+        (e.clientX - r.left) / r.width,
+        (e.clientY - r.top) / r.height);
+      if (dir) pageBy(dir);
       else document.body.classList.toggle("chrome-off");
     });
 
@@ -1469,7 +1494,7 @@
     el.voiceEn = $("voice-en");
     el.voiceNote = $("voice-note");
     el.keepAwake = $("keep-awake");
-    el.edgeTap = $("edge-tap");
+    el.tapGroup = $("tap-group");
     el.wakeNote = $("wake-note");
   }
 

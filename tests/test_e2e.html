@@ -167,6 +167,47 @@
 
   var win, spoken, wake, wakeReq0;
 
+  /* 在閱讀區的相對位置點一下（0~1）。手勢判斷看 pointerdown/pointerup 的座標。 */
+  function tapAt(fx, fy) {
+    var doc = win.document;
+    var c = doc.getElementById("content");
+    var r = c.getBoundingClientRect();
+    var x = r.left + r.width * fx;
+    var y = r.top + r.height * fy;
+    ["pointerdown", "pointerup"].forEach(function (type) {
+      c.dispatchEvent(new win.PointerEvent(type, { clientX: x, clientY: y, bubbles: true }));
+    });
+  }
+
+  /* 開設定 → 選翻頁手勢 → 關設定 */
+  function setTapMode(label) {
+    var doc = win.document;
+    doc.getElementById("settings-btn").click();
+    var btns = Array.prototype.slice.call(doc.querySelectorAll("#tap-group .seg-btn"));
+    var b = btns.filter(function (x) { return x.textContent === label; })[0];
+    if (b) b.click();
+    doc.querySelector('[data-close="sheet-settings"]').click();
+    return !!b && doc.getElementById("sheet-settings").classList.contains("hidden");
+  }
+
+  /* 點一下之後看閱讀區捲到哪、工具列收起了沒 */
+  function tapResult(fx, fy) {
+    var doc = win.document;
+    var c = doc.getElementById("content");
+    c.scrollTop = Math.floor(c.scrollHeight * 0.4);
+    var before = c.scrollTop;
+    var chromeBefore = doc.body.classList.contains("chrome-off");
+    tapAt(fx, fy);
+    return wait(700).then(function () {
+      var dy = c.scrollTop - before;
+      return {
+        dir: dy > 60 ? 1 : (dy < -60 ? -1 : 0),
+        dy: dy,
+        chromeToggled: doc.body.classList.contains("chrome-off") !== chromeBefore
+      };
+    });
+  }
+
   function voiceTest(where) {
     var doc = win.document;
     var errors = [];
@@ -356,6 +397,81 @@
           return wait(200);
         });
       });
+    });
+  }).then(function () {
+    /* 翻頁手勢：左右邊緣（預設） */
+    var doc = win.document;
+    doc.getElementById("settings-btn").click();
+    ok(doc.querySelectorAll("#tap-group .seg-btn").length === 3, "設定面板有翻頁手勢的三選一");
+    doc.querySelector('[data-close="sheet-settings"]').click();
+    ok(setTapMode("左右邊緣"), "可以選左右邊緣");
+    return tapResult(0.1, 0.5).then(function (r) {
+      eq(r.dir, -1, "左右模式：點左緣是上一頁（" + Math.round(r.dy) + "px）");
+      return tapResult(0.9, 0.5);
+    }).then(function (r) {
+      eq(r.dir, 1, "左右模式：點右緣是下一頁（" + Math.round(r.dy) + "px）");
+      return tapResult(0.5, 0.15);
+    }).then(function (r) {
+      eq(r.dir, 0, "左右模式：點上方不翻頁（" + Math.round(r.dy) + "px）");
+      ok(r.chromeToggled, "左右模式：點中間收起／叫回工具列");
+      return tapResult(0.5, 0.5);
+    }).then(function (r) {
+      ok(r.chromeToggled, "左右模式：再點中間切回來");
+    });
+  }).then(function () {
+    /* 翻頁手勢：上下區域 */
+    ok(setTapMode("上下區域"), "可以選上下區域");
+    return tapResult(0.5, 0.1).then(function (r) {
+      eq(r.dir, -1, "上下模式：點上方是上一頁（" + Math.round(r.dy) + "px）");
+      return tapResult(0.5, 0.9);
+    }).then(function (r) {
+      eq(r.dir, 1, "上下模式：點下方是下一頁（" + Math.round(r.dy) + "px）");
+      return tapResult(0.1, 0.5);
+    }).then(function (r) {
+      eq(r.dir, 0, "上下模式：點左緣不再翻頁（" + Math.round(r.dy) + "px）");
+      ok(r.chromeToggled, "上下模式：點中間高度收起工具列");
+      return tapResult(0.5, 0.5);
+    }).then(function (r) {
+      eq(r.dir, 0, "上下模式：正中央不翻頁");
+      ok(r.chromeToggled, "上下模式：正中央切回工具列");
+    });
+  }).then(function () {
+    /* 翻頁手勢：關閉 */
+    ok(setTapMode("關閉"), "可以選關閉");
+    return tapResult(0.1, 0.5).then(function (r) {
+      eq(r.dir, 0, "關閉：點左緣不翻頁");
+      return tapResult(0.5, 0.9);
+    }).then(function (r) {
+      eq(r.dir, 0, "關閉：點下方不翻頁");
+      ok(r.chromeToggled, "關閉：點哪裡都只收工具列");
+      /* 設定要存得住，並且回到預設的左右邊緣以免影響後面的測試 */
+      var saved = JSON.parse(win.localStorage.getItem("reader-settings-v1"));
+      eq(saved.tapMode, "off", "翻頁手勢有存進設定");
+      ok(setTapMode("左右邊緣"), "改回左右邊緣");
+    });
+  }).then(function () {
+    /* 舊版設定（edgeTap 開關）要自動轉成新的三選一 */
+    function withLegacy(edgeTap) {
+      var saved = JSON.parse(win.localStorage.getItem("reader-settings-v1"));
+      delete saved.tapMode;
+      saved.edgeTap = edgeTap;
+      win.localStorage.setItem("reader-settings-v1", JSON.stringify(saved));
+      return reloadApp().then(function (w) {
+        win = w;
+        return until(function () {
+          var on = win.document.querySelector("#tap-group .seg-btn.on");
+          return on ? on.textContent : null;
+        }, "重新載入後看得到翻頁手勢設定");
+      });
+    }
+    return withLegacy(false).then(function (label) {
+      eq(label, "關閉", "舊版關著的 edgeTap 轉成「關閉」");
+      return withLegacy(true);
+    }).then(function (label) {
+      eq(label, "左右邊緣", "舊版開著的 edgeTap 轉成「左右邊緣」");
+      return until(function () {
+        return win.document.querySelectorAll("#content .blk").length > 0 ? true : null;
+      }, "重新載入後回到閱讀畫面");
     });
   }).then(function () {
     /* 朗讀：換成 epub（有中英夾雜的章節） */
