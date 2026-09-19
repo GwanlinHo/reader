@@ -145,6 +145,32 @@
   eq(P.outlineToChapters([], [0], 3).length, 0, "沒有目錄就回空陣列");
   eq(P.outlineToChapters(null, [0], 3).length, 0, "null 目錄不會爆掉");
 
+  /* ================= 純函式：文字檢視 ←→ 頁面檢視的位置換算 ================= */
+
+  var PS = [0, 5, 9];   /* 三頁，各自從第 0、5、9 個區塊開始 */
+  eq(P.pageOfBlock(PS, 0), 1, "第一個區塊在第一頁");
+  eq(P.pageOfBlock(PS, 4), 1, "第五個區塊還在第一頁");
+  eq(P.pageOfBlock(PS, 5), 2, "第六個區塊落在第二頁");
+  eq(P.pageOfBlock(PS, 8), 2, "第二頁的最後一個區塊");
+  eq(P.pageOfBlock(PS, 9), 3, "第三頁從第 9 個區塊開始");
+  eq(P.pageOfBlock(PS, 999), 3, "超出範圍算在最後一頁");
+  eq(P.pageOfBlock(PS, -3), 1, "負數區塊算在第一頁");
+  eq(P.pageOfBlock([], 4), 1, "沒有對照表就回第一頁");
+  eq(P.pageOfBlock(null, 4), 1, "對照表是 null 也不會爆掉");
+
+  eq(P.blockOfPage(PS, 1), 0, "第一頁回到第 0 個區塊");
+  eq(P.blockOfPage(PS, 2), 5, "第二頁回到第 5 個區塊");
+  eq(P.blockOfPage(PS, 3), 9, "第三頁回到第 9 個區塊");
+  eq(P.blockOfPage(PS, 99), 9, "超出頁數夾在最後一頁");
+  eq(P.blockOfPage(PS, 0), 0, "頁碼 0 夾回第一頁");
+  eq(P.blockOfPage([], 2), 0, "沒有對照表就回第 0 個區塊");
+  eq(P.blockOfPage(null, 2), 0, "對照表是 null 也不會爆掉");
+
+  /* 來回換算：從任一頁切過去再切回來，一定回到那一頁開頭 */
+  for (var pg = 1; pg <= PS.length; pg++) {
+    eq(P.pageOfBlock(PS, P.blockOfPage(PS, pg)), pg, "第 " + pg + " 頁來回換算回到同一頁");
+  }
+
   /* ================= 真的解析三份 PDF ================= */
 
   function get(path) {

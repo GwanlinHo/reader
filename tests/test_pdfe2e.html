@@ -24,6 +24,7 @@
     flush("PARTIAL");
   }
   function eq(a, b, name) { ok(a === b, name, JSON.stringify(a) + " != " + JSON.stringify(b)); }
+  function info(m) { lines.push("    " + m); flush("PARTIAL"); }
   function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
   function until(fn, label, timeout) {
@@ -118,6 +119,21 @@
         var db = req.result;
         var g = db.transaction(["books"], "readonly").objectStore("books").getAll();
         g.onsuccess = function () { resolve(g.result); };
+        g.onerror = function () { reject(g.error); };
+      };
+      req.onerror = function () { reject(req.error); };
+    });
+  }
+
+  var beforeB = 0, beforePct = "", expectPage = 1;
+
+  /* 從資料庫讀出這本書的頁面對照表，測試才能自己算出應該落在哪一頁 */
+  function loadPageStart(win, id) {
+    return new Promise(function (resolve, reject) {
+      var req = win.indexedDB.open("reader-db");
+      req.onsuccess = function () {
+        var g = req.result.transaction(["docs"], "readonly").objectStore("docs").get(id);
+        g.onsuccess = function () { resolve((g.result && g.result.pageStart) || []); };
         g.onerror = function () { reject(g.error); };
       };
       req.onerror = function () { reject(req.error); };
@@ -322,6 +338,72 @@
       ok(!doc.body.classList.contains("page-mode"), "切回文字型 PDF 不是頁面模式");
       ok(doc.getElementById("play-btn").offsetParent !== null, "朗讀鈕回來了");
       ok(doc.querySelectorAll("#content .s.noted").length > 0, "先前的註解還在");
+      return bookNamed(win, "text_zh").then(function (bk) {
+        return loadPageStart(win, bk.id);
+      }).then(function (ps) {
+        win.__docPageStart = ps;
+        ok(ps.length > 0, "文件裡存了頁面對照表（" + ps.length + " 頁）");
+      });
+    }).then(function () {
+      /* 文字型 PDF：切到原始版面看圖表，再切回來要停在同一個位置 */
+      var viewBtn = doc.getElementById("view-btn");
+      ok(viewBtn && !viewBtn.classList.contains("hidden"), "文字型 PDF 有「原版」切換鈕");
+      eq(viewBtn.textContent, "原版", "文字檢視時按鈕寫「原版」");
+      /* 先捲到後面，才看得出位置有沒有接上 */
+      var c = doc.getElementById("content");
+      c.scrollTop = Math.floor(c.scrollHeight * 0.5);
+      c.dispatchEvent(new win.Event("scroll"));
+      return wait(200);
+    }).then(function () {
+      var cr = doc.getElementById("content").getBoundingClientRect();
+      var sp = Array.prototype.slice.call(doc.querySelectorAll("#content .s"))
+        .filter(function (x) { return x.getBoundingClientRect().bottom > cr.top + 10; })[0];
+      beforeB = sp ? +sp.getAttribute("data-b") : 0;
+      beforePct = doc.getElementById("progress-label").textContent;
+      expectPage = win.RD.pdfdoc.pageOfBlock(win.__docPageStart, beforeB);
+      doc.getElementById("view-btn").click();
+      return until(function () {
+        return doc.body.classList.contains("page-mode") &&
+          /第 \d+／\d+ 頁/.test(doc.getElementById("read-chapter").textContent) ? true : null;
+      }, "切到頁面檢視", 30000);
+    }).then(function () {
+      var label = doc.getElementById("read-chapter").textContent;
+      info("切換前區塊 " + beforeB + "，頁面檢視顯示：" + label);
+      eq(+label.match(/第 (\d+)/)[1], expectPage, "切到原版時停在這一段所在的那一頁");
+      ok(doc.querySelector("#content canvas"), "頁面檢視畫出 canvas");
+      eq(doc.getElementById("view-btn").textContent, "文字", "頁面檢視時按鈕寫「文字」");
+      ok(doc.getElementById("play-btn").offsetParent === null, "頁面檢視收起朗讀鈕");
+      ok(doc.getElementById("add-annot-btn").offsetParent === null, "頁面檢視收起加註解鈕");
+      ok(/%/.test(doc.getElementById("progress-label").textContent), "頁面檢視仍顯示百分比");
+      return bookNamed(win, "text_zh");
+    }).then(function (bk) {
+      ok(bk.anchor.b >= win.RD.pdfdoc.blockOfPage(win.__docPageStart, expectPage) - 1,
+         "頁面檢視存的是文字錨點，不是頁碼減一（" + JSON.stringify(bk.anchor) + "）");
+      doc.getElementById("view-btn").click();
+      return until(function () {
+        return !doc.body.classList.contains("page-mode") &&
+          doc.querySelectorAll("#content .blk").length ? true : null;
+      }, "切回文字檢視", 30000);
+    }).then(function () {
+      var cr = doc.getElementById("content").getBoundingClientRect();
+      var sp = Array.prototype.slice.call(doc.querySelectorAll("#content .s"))
+        .filter(function (x) { return x.getBoundingClientRect().bottom > cr.top + 10; })[0];
+      var backB = sp ? +sp.getAttribute("data-b") : -1;
+      var pageB = win.RD.pdfdoc.blockOfPage(win.__docPageStart, expectPage);
+      info("切回文字檢視後最上方區塊 " + backB + "，該頁開頭區塊 " + pageB);
+      eq(backB, pageB, "切回文字檢視停在同一頁開頭的那一段");
+      ok(doc.getElementById("play-btn").offsetParent !== null, "切回文字檢視朗讀鈕回來");
+      ok(doc.querySelectorAll("#content .s.noted").length > 0, "切換來回後註解還在");
+      /* 掃描書沒有文字層，不該出現切換鈕 */
+      doc.getElementById("back-btn").click();
+      return wait(300);
+    }).then(function () {
+      ok(openFromShelf(win, "scan"), "再開掃描書");
+      return until(function () {
+        return doc.body.classList.contains("page-mode") ? true : null;
+      }, "掃描書進頁面檢視", 30000);
+    }).then(function () {
+      ok(doc.getElementById("view-btn").classList.contains("hidden"), "掃描書不出現切換鈕");
     });
   }
 

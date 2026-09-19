@@ -215,6 +215,26 @@
 
   /* ---------- 純函式：PDF 目錄 → 章節 ---------- */
 
+  /* 文字檢視與頁面檢視的位置換算（pageStart[i] = 第 i 頁的第一個區塊索引）。
+     兩邊都夾在合法範圍內，pageStart 壞掉或空的時候回最保守的值。 */
+
+  function pageOfBlock(pageStart, b) {
+    if (!pageStart || !pageStart.length) return 1;
+    b = b || 0;
+    var page = 1;
+    for (var i = 0; i < pageStart.length; i++) {
+      if (pageStart[i] <= b) page = i + 1;
+      else break;
+    }
+    return page;
+  }
+
+  function blockOfPage(pageStart, p) {
+    if (!pageStart || !pageStart.length) return 0;
+    var i = Math.max(0, Math.min(pageStart.length - 1, (p || 1) - 1));
+    return pageStart[i] || 0;
+  }
+
   /* entries 是 [{ title, page }]（page 從 1 起算），pageStart 來自 linesToBlocks */
   function outlineToChapters(entries, pageStart, blockCount) {
     var out = [];
@@ -419,8 +439,9 @@
   }
 
   RD.pdfdoc = {
-    /* PDF 解析邏輯有實質改變就 +1（和 RD.parse.VERSION 分開記） */
-    VERSION: 1,
+    /* PDF 解析邏輯有實質改變就 +1（和 RD.parse.VERSION 分開記）
+       v2：pageStart 要存進資料庫，文字檢視與頁面檢視才能互相換算位置 */
+    VERSION: 2,
     BASE: "",
     SRC: SRC,
     POLYFILLS: POLYFILLS,
@@ -436,6 +457,8 @@
     linesToBlocks: linesToBlocks,
     looksScanned: looksScanned,
     outlineToChapters: outlineToChapters,
+    pageOfBlock: pageOfBlock,
+    blockOfPage: blockOfPage,
     url: url,
     load: load,
     readTextContent: readTextContent,

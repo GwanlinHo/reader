@@ -343,6 +343,7 @@
               blocks: doc.blocks,
               chapters: doc.chapters,
               totalChars: doc.totalChars,
+              pageStart: r.pageStart || [],
               parserVersion: RD.parse.VERSION,
               pdfVersion: r.format === "pdf" ? RD.pdfdoc.VERSION : 0
             })
@@ -387,6 +388,7 @@
           showView("read");
           buildToc();
           renderChapter(chapterOf(anchor.b), anchor);
+          updateViewBtn();
           document.body.classList.remove("chrome-off");
         });
       });
@@ -412,6 +414,7 @@
           blocks: nd.blocks,
           chapters: nd.chapters,
           totalChars: nd.totalChars,
+          pageStart: r.pageStart || [],
           parserVersion: RD.parse.VERSION,
           pdfVersion: r.format === "pdf" ? RD.pdfdoc.VERSION : 0
         };
@@ -639,6 +642,7 @@
   }
 
   function saveProgress(anchorIn) {
+    if (cur.pdfPage) return savePdfProgress();
     if (!cur.book || !cur.doc) return Promise.resolve();
     var a = anchorIn || currentAnchor();
     var p = percentOfAnchor(a);
@@ -654,7 +658,7 @@
 
   function buildToc() {
     el.tocList.textContent = "";
-    if (cur.pdfPage) {
+    if (cur.pdfPage && !pageViewHasDoc()) {
       var total = cur.pdfPage.count;
       for (var n = 1; n <= total; n++) {
         (function (page) {
@@ -681,10 +685,14 @@
       li.appendChild(p);
       li.setAttribute("data-ci", String(i));
       li.addEventListener("click", function () {
+        closeSheet("sheet-toc");
+        if (pageViewHasDoc()) {
+          showPdfPage(RD.pdfdoc.pageOfBlock(cur.doc.pageStart, ch.start));
+          return;
+        }
         RD.speech.stop();
         renderChapter(i, { b: ch.start, o: 0 });
         saveProgress();
-        closeSheet("sheet-toc");
       });
       el.tocList.appendChild(li);
     });
@@ -692,21 +700,76 @@
   }
 
   function markTocActive() {
-    var here = cur.pdfPage ? (cur.pdfPage.page - 1) : cur.chapter;
+    var here;
+    if (pageViewHasDoc()) here = chapterOf(RD.pdfdoc.blockOfPage(cur.doc.pageStart, cur.pdfPage.page));
+    else here = cur.pdfPage ? (cur.pdfPage.page - 1) : cur.chapter;
     var items = el.tocList.querySelectorAll("li");
     for (var i = 0; i < items.length; i++) {
       var on = +items[i].getAttribute("data-ci") === here;
       items[i].classList.toggle("on", on);
-      if (on && cur.pdfPage && items[i].scrollIntoView) {
+      if (on && cur.pdfPage && !pageViewHasDoc() && items[i].scrollIntoView) {
         try { items[i].scrollIntoView({ block: "nearest" }); } catch (e) { /* 忽略 */ }
       }
     }
   }
 
-  /* ---------- PDF 頁面檢視（掃描書） ---------- */
+  /* ---------- PDF 頁面檢視 ---------- */
 
-  /* 掃描書沒有文字層，只能一頁一張圖看。位置錨點沿用 { b, o }，b 就是頁碼減一，
-     這樣進度、備份、書架百分比都不用改。朗讀與註解在這個模式下關閉。 */
+  /* 兩種書都會用到這個模式：
+     - 掃描書（format "pdf-image"）：沒有文字層，只能一頁一張圖看，錨點的 b 就是頁碼減一。
+     - 文字型 PDF（format "pdf"）：平常讀重排後的文字，想看圖表時切過來看原始版面。
+       這種情況 cur.doc 保留著，位置用 doc.pageStart 在「區塊」與「頁碼」之間換算，
+       進度一律存文字錨點，所以書架百分比、註解、備份都不必改。
+     兩種情況朗讀與註解都關閉（page-mode 的 CSS 會把按鈕收起來）。 */
+
+  /* 目前是「文字型 PDF 的頁面檢視」嗎（cur.doc 還在，位置可換算） */
+  function pageViewHasDoc() {
+    return !!(cur.pdfPage && cur.pdfPage.fromText && cur.doc && cur.doc.pageStart && cur.doc.pageStart.length);
+  }
+
+  /* 這本書能不能切換檢視：有文字層的 PDF，而且存了頁面對照表 */
+  function canSwitchView() {
+    return !!(cur.book && cur.book.format === "pdf" && cur.doc &&
+      cur.doc.pageStart && cur.doc.pageStart.length);
+  }
+
+  function updateViewBtn() {
+    if (!el.viewBtn) return;
+    var show = canSwitchView();
+    el.viewBtn.classList.toggle("hidden", !show);
+    if (!show) return;
+    var inPage = !!cur.pdfPage;
+    el.viewBtn.textContent = inPage ? "文字" : "原版";
+    el.viewBtn.setAttribute("aria-label", inPage ? "回到文字檢視" : "看 PDF 原始版面");
+  }
+
+  function toggleView() {
+    if (!canSwitchView()) return Promise.resolve();
+    return cur.pdfPage ? exitPageView() : enterPageView();
+  }
+
+  /* 文字 → 原版：從畫面最上方那一句換算成頁碼 */
+  function enterPageView() {
+    if (cur.pdfPage || !canSwitchView()) return Promise.resolve();
+    RD.speech.stop();
+    var anchor = currentAnchor();
+    cancelQueuedSave();
+    return saveProgress(anchor).then(function () {
+      return mountPageView(cur.book, RD.pdfdoc.pageOfBlock(cur.doc.pageStart, anchor.b), true);
+    });
+  }
+
+  /* 原版 → 文字：回到這一頁開頭的那個區塊 */
+  function exitPageView() {
+    if (!pageViewHasDoc()) return Promise.resolve();
+    var b = RD.pdfdoc.blockOfPage(cur.doc.pageStart, cur.pdfPage.page);
+    closePdfView();
+    el.content.textContent = "";
+    buildToc();
+    renderChapter(chapterOf(b), { b: b, o: 0 });
+    updateViewBtn();
+    return saveProgress({ b: b, o: 0 });
+  }
 
   function closePdfView() {
     var st = cur.pdfPage;
@@ -718,7 +781,6 @@
   }
 
   function openPdfImageBook(bk) {
-    closePdfView();
     RD.speech.stop();
     cur.book = bk;
     cur.doc = null;
@@ -727,6 +789,13 @@
     cur.spanMap = {};
     cur.annots = [];
     cur.noteKeys = {};
+    var start = (bk.anchor && bk.anchor.b ? bk.anchor.b : 0) + 1;
+    return mountPageView(bk, start, false);
+  }
+
+  /* fromText=true 代表是文字型 PDF 切過來的（cur.doc 要留著） */
+  function mountPageView(bk, startPage, fromText) {
+    closePdfView();
     document.body.classList.add("page-mode");
     el.readTitle.textContent = bk.title || bk.fileName;
     el.readChapter.textContent = "載入中…";
@@ -739,7 +808,11 @@
     canvas.className = "pdf-canvas";
     el.content.appendChild(canvas);
 
-    cur.pdfPage = { pdf: null, page: 1, count: bk.pageCount || 0, canvas: canvas, token: 0 };
+    cur.pdfPage = {
+      pdf: null, page: startPage || 1, count: bk.pageCount || 0,
+      canvas: canvas, token: 0, fromText: !!fromText
+    };
+    updateViewBtn();
     setStatus("正在開啟 PDF…", 0);
 
     return RD.db.getFile(bk.id).then(function (rec) {
@@ -752,8 +825,7 @@
       cur.book.pageCount = pdf.numPages;
       buildToc();
       setStatus("");
-      var start = (bk.anchor && bk.anchor.b ? bk.anchor.b : 0) + 1;
-      return showPdfPage(start);
+      return showPdfPage(cur.pdfPage.page);
     }).catch(function (e) {
       setStatus("PDF 開啟失敗：" + ((e && e.message) || e), 8000);
       el.readChapter.textContent = "無法開啟";
@@ -781,7 +853,12 @@
     }).then(function () {
       if (!cur.pdfPage || token !== cur.pdfPage.token) return;
       el.content.scrollTop = 0;
-      el.readChapter.textContent = "第 " + n + "／" + st.count + " 頁";
+      var label = "第 " + n + "／" + st.count + " 頁";
+      if (pageViewHasDoc()) {
+        var ch = cur.doc.chapters[chapterOf(RD.pdfdoc.blockOfPage(cur.doc.pageStart, n))];
+        if (ch && ch.title) label += "　" + ch.title;
+      }
+      el.readChapter.textContent = label;
       markTocActive();
       return savePdfProgress();
     }).catch(function (e) {
@@ -792,6 +869,17 @@
   function savePdfProgress() {
     var st = cur.pdfPage;
     if (!cur.book || !st || !st.count) return Promise.resolve();
+    if (pageViewHasDoc()) {
+      /* 文字型 PDF：進度一律存文字錨點，切回文字檢視、書架百分比、備份才接得上 */
+      var a = { b: RD.pdfdoc.blockOfPage(cur.doc.pageStart, st.page), o: 0 };
+      var pt = percentOfAnchor(a);
+      cur.book.anchor = a;
+      cur.book.percent = pt;
+      cur.book.lastReadAt = Date.now();
+      if (pt >= 0.995) cur.book.finished = true;
+      el.progressLabel.textContent = pct(pt) + "%";
+      return RD.db.putBook(cur.book);
+    }
     var p = st.page / st.count;
     cur.book.anchor = { b: st.page - 1, o: 0 };
     cur.book.percent = p;
@@ -1310,6 +1398,7 @@
       showView("shelf");
     });
     $("toc-btn").addEventListener("click", function () { openSheet("sheet-toc"); });
+    el.viewBtn.addEventListener("click", function () { toggleView(); });
     $("annots-btn").addEventListener("click", function () { renderAnnotList(); openSheet("sheet-annots"); });
     $("add-annot-btn").addEventListener("click", addAnnotFromSelection);
     $("annot-save").addEventListener("click", saveAnnot);
@@ -1417,9 +1506,12 @@
     /* 閱讀區：捲動存進度、點左右邊緣翻頁、點中央收起工具列 */
     el.content.addEventListener("scroll", function () {
       if (cur.pdfPage) {
-        /* 頁面檢視模式沒有文字錨點，進度只看頁碼；捲動不必寫資料庫 */
-        el.progressLabel.textContent =
-          pct(cur.pdfPage.count ? cur.pdfPage.page / cur.pdfPage.count : 0) + "%";
+        /* 頁面檢視捲動不必寫資料庫，只更新百分比；
+           文字型 PDF 用文字錨點換算，數字才會跟文字檢視一致 */
+        var p = pageViewHasDoc()
+          ? percentOfAnchor({ b: RD.pdfdoc.blockOfPage(cur.doc.pageStart, cur.pdfPage.page), o: 0 })
+          : (cur.pdfPage.count ? cur.pdfPage.page / cur.pdfPage.count : 0);
+        el.progressLabel.textContent = pct(p) + "%";
         return;
       }
       updateProgressLabel();
@@ -1495,6 +1587,7 @@
     el.voiceNote = $("voice-note");
     el.keepAwake = $("keep-awake");
     el.tapGroup = $("tap-group");
+    el.viewBtn = $("view-btn");
     el.wakeNote = $("wake-note");
   }
 
