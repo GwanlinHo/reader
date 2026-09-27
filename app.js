@@ -11,7 +11,8 @@
 
   var SET_KEY = "reader-settings-v1";
 
-  var FONT_SIZES = [0.98, 1.06, 1.14, 1.24, 1.36];
+  /* 整條階梯比初版上移一級有餘，最大級 1.8rem（約 28.8px）對到紙本超大字版，老花可讀。 */
+  var FONT_SIZES = [1.10, 1.24, 1.40, 1.58, 1.80];
   var FONT_LABELS = ["最小", "小", "中", "大", "最大"];
   var LINE_HEIGHTS = [1.6, 1.8, 2.0, 2.25];
   var LINE_LABELS = ["緊", "適中", "鬆", "很鬆"];

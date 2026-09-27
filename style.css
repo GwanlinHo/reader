@@ -12,7 +12,7 @@
   --accent-fg: #ffffff;
   --mark: rgba(196, 154, 92, 0.32);
   --danger: #9c3b30;
-  --read-size: 1.12rem;
+  --read-size: 1.40rem;   /* JS 套用前的預設，對齊 FONT_SIZES[2]（「中」） */
   --read-line: 1.9;
   --read-family: system-ui, -apple-system, "Noto Sans CJK TC", "PingFang TC",
                  "Microsoft JhengHei", sans-serif;
@@ -177,7 +177,7 @@ input[type="file"] { position: absolute; width: 1px; height: 1px; opacity: 0; po
 }
 .content .s.on { background: var(--mark); border-radius: 3px; }
 .content .s.noted { border-bottom: 2px solid var(--accent); }
-.content .chap-end { text-align: center; color: var(--dim); font-size: 0.82rem; margin: 2em 0 1em; text-indent: 0; }
+.content .chap-end { text-align: center; color: var(--dim); font-size: 0.75em; margin: 2em 0 1em; text-indent: 0; }
 
 .bottom {
   display: flex;
