@@ -81,7 +81,39 @@
     });
   }
 
-  var win, bookId, quote = "";
+  var win, bookId, quote = "", ids = {};
+
+  function patchDoc(id, fn) {
+    return new Promise(function (resolve, reject) {
+      var req = win.indexedDB.open("reader-db");
+      req.onsuccess = function () {
+        var t = req.result.transaction(["docs"], "readwrite");
+        var st = t.objectStore("docs");
+        var g = st.get(id);
+        g.onsuccess = function () { var d = g.result; fn(d); st.put(d); };
+        t.oncomplete = function () { resolve(); };
+        t.onerror = function () { reject(t.error); };
+      };
+      req.onerror = function () { reject(req.error); };
+    });
+  }
+
+  function openByTitle(re) {
+    var doc = win.document;
+    return until(function () {
+      var hit = Array.prototype.slice.call(doc.querySelectorAll("#shelf-list li")).filter(function (li) { return re.test(li.textContent); })[0];
+      if (!hit) {
+        if (!doc.getElementById("view-read").classList.contains("hidden")) doc.getElementById("back-btn").click();
+        return null;
+      }
+      hit.querySelector(".b-main").click();
+      return true;
+    }, "書架上找到 " + re).then(function () {
+      return until(function () {
+        return re.test(doc.getElementById("read-title").textContent) && doc.querySelectorAll("#content .blk").length ? true : null;
+      }, "開書 " + re, 25000);
+    });
+  }
 
   wipe().then(function () { return loadApp("../index.html?upgrade=1"); }).then(function (w) {
     win = w;
@@ -169,6 +201,41 @@
     var bk = books[0];
     ok(bk.totalChars > 20, "書目字數已更新（" + bk.totalChars + "）");
     ok(bk.anchor && typeof bk.anchor.b === "number", "閱讀位置仍是合法錨點", JSON.stringify(bk.anchor));
+    /* v2 → v3：epub 要重解出多層目錄；txt 結果沒變，不該重解 */
+    return importFixture(win, "tree.epub", "application/epub+zip");
+  }).then(function () {
+    return importFixture(win, "sample_utf8.txt", "text/plain");
+  }).then(function () {
+    return idb(win, ["books"], "readonly", function (t) { return t.objectStore("books").getAll(); });
+  }).then(function (books) {
+    ids.tree = books.filter(function (b) { return /多層目錄/.test(b.title); })[0].id;
+    ids.txt = books.filter(function (b) { return b.format === "txt"; })[0].id;
+    return patchDoc(ids.tree, function (d) { d.parserVersion = 2; delete d.toc; })
+      .then(function () { return patchDoc(ids.txt, function (d) { d.parserVersion = 2; d.chapters[0].title = "舊版標記"; }); });
+  }).then(function () {
+    return loadApp();
+  }).then(function (w) {
+    win = w;
+    return openByTitle(/多層目錄/);
+  }).then(function () {
+    return until(function () {
+      return idb(win, ["docs"], "readonly", function (t) { return t.objectStore("docs").get(ids.tree); })
+        .then(function (d) { return d.parserVersion === win.RD.parse.VERSION ? d : null; });
+    }, "v2 epub 重新解析");
+  }).then(function (d) {
+    ok(d.toc && d.toc.length === 12, "v2 epub 開書後補上多層目錄", d.toc && d.toc.length);
+    var doc = win.document;
+    doc.getElementById("toc-btn").click();
+    ok(doc.getElementById("toc-list").classList.contains("tree"), "目錄面板顯示多層目錄");
+    doc.querySelector('[data-close="sheet-toc"]').click();
+    doc.getElementById("back-btn").click();
+    return wait(500).then(function () { return openByTitle(/sample_utf8/); });
+  }).then(function () {
+    return wait(1500);
+  }).then(function () {
+    return idb(win, ["docs"], "readonly", function (t) { return t.objectStore("docs").get(ids.txt); });
+  }).then(function (d) {
+    ok(d.parserVersion === 2 && d.chapters[0].title === "舊版標記", "v2 txt 不重新解析", d.parserVersion);
     flush("DONE");
   }).catch(function (e) {
     fail++;
