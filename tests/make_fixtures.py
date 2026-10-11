@@ -201,3 +201,80 @@ with zipfile.ZipFile(buf, "w") as z:
     z.writestr("OEBPS/toc.xhtml", BR_TOC, compress_type=zipfile.ZIP_DEFLATED)
     z.writestr("OEBPS/1.xhtml", BR_CH1, compress_type=zipfile.ZIP_DEFLATED)
 write("brdiv.epub", buf.getvalue())
+
+
+# 多層目錄（篇 > 章 > 節）的 epub：篇名頁只有一行標題，會被併進下一段渲染單位，
+# 但目錄裡必須還看得到篇名與章名；小節是同一檔案內的錨點。
+def tree_page(title, secs):
+    body = "<h1>%s</h1>\n" % title
+    for sid, st in secs:
+        body += '<h2 id="%s">%s</h2>\n' % (sid, st)
+        body += "<p>%s的內容。%s</p>\n" % (st, "這一段是填充文字，讓小節有足夠的份量。" * 6)
+    return ('<?xml version="1.0" encoding="utf-8"?>\n<html xmlns="http://www.w3.org/1999/xhtml">'
+            '<head><title>%s</title></head><body>\n%s</body></html>' % (title, body))
+
+TREE = [
+    ("p1.xhtml", "第一篇　單句", None),
+    ("c1.xhtml", "第一章　基本句型", [("s1", "前言"), ("s2", "主部與述部"), ("s3", "補語")]),
+    ("c2.xhtml", "第二章　名詞片語", [("s1", "名詞片語的構造"), ("s2", "限定詞")]),
+    ("p2.xhtml", "第二篇　複句", None),
+    ("c3.xhtml", "第三章　合句", [("s1", "對等連接詞"), ("s2", "相關字組")]),
+]
+
+def build_tree_epub(path, use_ncx=False):
+    nav = ['<nav epub:type="toc"><ol>']
+    ncx = []
+    order = [0]
+    def np(label, src, kids=""):
+        order[0] += 1
+        return ('<navPoint id="n%d" playOrder="%d"><navLabel><text>%s</text></navLabel>'
+                '<content src="%s"/>%s</navPoint>' % (order[0], order[0], label, src, kids))
+    i = 0
+    while i < len(TREE):
+        fn, title, _ = TREE[i]
+        nav.append('<li><a href="text/%s">%s</a><ol>' % (fn, title))
+        kids = ""
+        i += 1
+        while i < len(TREE) and TREE[i][2] is not None:
+            cfn, ct, secs = TREE[i]
+            nav.append('<li><a href="text/%s">%s</a><ol>' % (cfn, ct))
+            sub = "".join(np(st, "text/%s#%s" % (cfn, sid)) for sid, st in secs)
+            nav.extend('<li><a href="text/%s#%s">%s</a></li>' % (cfn, sid, st) for sid, st in secs)
+            nav.append("</ol></li>")
+            kids += np(ct, "text/" + cfn, sub)
+            i += 1
+        nav.append("</ol></li>")
+        ncx.append(np(title, "text/" + fn, kids))
+    nav.append("</ol></nav>")
+    items = "".join('<item id="i%d" href="text/%s" media-type="application/xhtml+xml"/>' % (k, t[0])
+                    for k, t in enumerate(TREE))
+    spine = "".join('<itemref idref="i%d"/>' % k for k in range(len(TREE)))
+    if use_ncx:
+        tocitem = '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>'
+        spine_open = '<spine toc="ncx">'
+    else:
+        tocitem = '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>'
+        spine_open = "<spine>"
+    opf = ('<?xml version="1.0" encoding="utf-8"?>\n<package xmlns="http://www.idpf.org/2007/opf" version="3.0" '
+           'unique-identifier="bid"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+           '<dc:title>多層目錄測試</dc:title><dc:creator>測試作者</dc:creator><dc:language>zh-TW</dc:language>'
+           '<dc:identifier id="bid">urn:uuid:tree-%d</dc:identifier></metadata><manifest>%s%s</manifest>%s%s</spine></package>'
+           % (1 if use_ncx else 0, tocitem, items, spine_open, spine))
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr(zipfile.ZipInfo("mimetype"), "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+        z.writestr("META-INF/container.xml", CONTAINER, compress_type=zipfile.ZIP_DEFLATED)
+        z.writestr("OEBPS/content.opf", opf, compress_type=zipfile.ZIP_DEFLATED)
+        if use_ncx:
+            z.writestr("OEBPS/toc.ncx", '<?xml version="1.0" encoding="utf-8"?>\n<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" '
+                       'version="2005-1"><navMap>%s</navMap></ncx>' % "".join(ncx), compress_type=zipfile.ZIP_DEFLATED)
+        else:
+            z.writestr("OEBPS/nav.xhtml", '<?xml version="1.0" encoding="utf-8"?>\n<html xmlns="http://www.w3.org/1999/xhtml" '
+                       'xmlns:epub="http://www.idpf.org/2007/ops"><head><title>目錄</title></head><body>%s</body></html>'
+                       % "\n".join(nav), compress_type=zipfile.ZIP_DEFLATED)
+        for fn, title, secs in TREE:
+            z.writestr("OEBPS/text/" + fn, tree_page(title, secs or []), compress_type=zipfile.ZIP_DEFLATED)
+    write(path, buf.getvalue())
+
+build_tree_epub("tree.epub")
+build_tree_epub("tree_ncx.epub", use_ncx=True)

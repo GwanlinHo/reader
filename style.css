@@ -328,3 +328,11 @@ body.chrome-off .read-bar { display: none; }
 body.page-mode #play-btn,
 body.page-mode #add-annot-btn,
 body.page-mode #annots-btn { display: none; }
+
+/* 多層目錄（epub 自帶 nav／ncx） */
+.toc-list li .t-fold { flex: 0 0 1.4em; text-align: center; color: var(--dim); margin: -11px 0; padding: 11px 0; }
+.toc-list li .t-name { flex: 1 1 auto; min-width: 0; }
+.toc-list.tree li.lv0 { font-weight: 600; }
+.toc-list li.lv1 { padding-left: 1.2em; }
+.toc-list li.lv2 { padding-left: 2.4em; font-size: 0.88rem; }
+.toc-list li.lv3, .toc-list li.lv4 { padding-left: 3.6em; font-size: 0.85rem; }

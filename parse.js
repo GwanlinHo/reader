@@ -453,9 +453,11 @@
     });
     if (!spine.length) throw new Error("epub 的 spine 沒有可讀的內容");
 
-    return loadToc(zip, navPath, ncxPath).then(function (tocMap) {
+    return loadToc(zip, navPath, ncxPath).then(function (toc) {
+      var tocMap = toc.map;
       var blocks = [];
       var chapters = [];
+      var posOf = {};
       var chain = Promise.resolve();
       spine.forEach(function (path, idx) {
         chain = chain.then(function () {
@@ -464,8 +466,19 @@
             var body = doc2.body || findByLocal(doc2, "body")[0];
             var got = [];
             extractBlocks(body, got);
-            if (!got.length) return;
             var base = blocks.length;
+            var ids = null;
+            posOf[path] = {
+              base: base,
+              resolve: function (frag) {
+                if (!ids) ids = collectIds(doc2);
+                var fe = ids[frag];
+                if (!fe) return -1;
+                var bi = firstBlockAtOrAfter(got, fe);
+                return bi < 0 ? (got.length ? -1 : base) : base + bi;
+              }
+            };
+            if (!got.length) return;
             var starts = chapterStarts(doc2, got, tocMap[path] || [], idx);
             got.forEach(function (b) { blocks.push({ k: b.k, t: b.t }); });
             starts.forEach(function (st, i) {
@@ -485,13 +498,17 @@
       });
       return chain.then(function () {
         if (!blocks.length) throw new Error("epub 沒有可讀的文字內容");
-        return finishDoc(blocks, chapters, { title: title, author: author, lang: lang });
+        var doc = finishDoc(blocks, chapters, { title: title, author: author, lang: lang });
+        var tl = resolveToc(toc.list, posOf, blocks.length);
+        if (tl) doc.toc = tl;
+        return doc;
       });
     });
   }
 
-  /* map[檔案路徑] = [{ frag, label }]，保持目錄原本的順序 */
-  function addToc(map, baseDir, href, label) {
+  /* map[檔案路徑] = [{ frag, label }]，保持目錄原本的順序（切渲染單位用）；
+     list 是整份目錄的平面清單，保留層級 lv（給目錄面板用） */
+  function addToc(toc, baseDir, href, label, lv) {
     if (!href || !label) return;
     var raw = String(href);
     var hash = raw.indexOf("#");
@@ -499,13 +516,48 @@
     try { frag = decodeURIComponent(frag); } catch (e) { /* 保留原樣 */ }
     var p = resolvePath(baseDir, raw);
     if (!p) return;
+    toc.list.push({ path: p, frag: frag, label: label, lv: lv || 0 });
+    var map = toc.map;
     if (!map[p]) map[p] = [];
     if (map[p].some(function (e) { return e.frag === frag; })) return;
     map[p].push({ frag: frag, label: label });
   }
 
+  function childrenByLocal(el, name) {
+    var out = [];
+    for (var i = 0; i < el.children.length; i++) {
+      if (localName(el.children[i]) === name) out.push(el.children[i]);
+    }
+    return out;
+  }
+
+  /* nav 的 <ol><li><a/><ol>…</ol></li></ol> 巢狀結構就是目錄層級 */
+  function walkNavList(list, depth, baseDir, toc) {
+    childrenByLocal(list, "li").forEach(function (li) {
+      var a = null, subs = [];
+      for (var i = 0; i < li.children.length; i++) {
+        var c = li.children[i], n = localName(c);
+        if (n === "ol" || n === "ul") { subs.push(c); continue; }
+        if (!a) a = n === "a" ? c : findByLocal(c, "a")[0] || null;
+      }
+      if (a) addToc(toc, baseDir, a.getAttribute("href"), cleanText(a.textContent), depth);
+      subs.forEach(function (s) { walkNavList(s, a ? depth + 1 : depth, baseDir, toc); });
+    });
+  }
+
+  function walkNcx(parent, depth, baseDir, toc) {
+    childrenByLocal(parent, "navpoint").forEach(function (np) {
+      var content = childrenByLocal(np, "content")[0];
+      var labels = findByLocal(np, "text");
+      if (content && labels.length) {
+        addToc(toc, baseDir, content.getAttribute("src") || "", cleanText(labels[0].textContent), depth);
+      }
+      walkNcx(np, depth + 1, baseDir, toc);
+    });
+  }
+
   function loadToc(zip, navPath, ncxPath) {
-    var map = {};
+    var toc = { map: {}, list: [] };
     if (navPath && zip.has(navPath)) {
       return zip.getText(navPath).then(function (xml) {
         var navs = findByLocal(parseXml(xml), "nav");
@@ -516,25 +568,50 @@
         }
         if (!target && navs.length) target = navs[0];
         if (target) {
-          findByLocal(target, "a").forEach(function (a) {
-            addToc(map, dirOf(navPath), a.getAttribute("href"), cleanText(a.textContent));
-          });
+          var lists = [];
+          for (var j = 0; j < target.children.length; j++) {
+            var n = localName(target.children[j]);
+            if (n === "ol" || n === "ul") lists.push(target.children[j]);
+          }
+          lists.forEach(function (l) { walkNavList(l, 0, dirOf(navPath), toc); });
+          /* 不合規範的 nav（a 沒包在 ol/li 裡）退回平面清單 */
+          if (!toc.list.length) {
+            findByLocal(target, "a").forEach(function (a) {
+              addToc(toc, dirOf(navPath), a.getAttribute("href"), cleanText(a.textContent), 0);
+            });
+          }
         }
-        return map;
-      }).catch(function () { return map; });
+        return toc;
+      }).catch(function () { return toc; });
     }
     if (ncxPath && zip.has(ncxPath)) {
       return zip.getText(ncxPath).then(function (xml) {
-        findByLocal(parseXml(xml), "navpoint").forEach(function (np) {
-          var content = findByLocal(np, "content")[0];
-          var labels = findByLocal(np, "text");
-          if (!content || !labels.length) return;
-          addToc(map, dirOf(ncxPath), content.getAttribute("src") || "", cleanText(labels[0].textContent));
-        });
-        return map;
-      }).catch(function () { return map; });
+        var maps = findByLocal(parseXml(xml), "navmap");
+        if (maps.length) walkNcx(maps[0], 0, dirOf(ncxPath), toc);
+        return toc;
+      }).catch(function () { return toc; });
     }
-    return Promise.resolve(map);
+    return Promise.resolve(toc);
+  }
+
+  /* 目錄每一條換算成區塊索引 b。跟渲染單位脫鉤：只有一行章名的頁面會被併進
+     下一段渲染單位，但目錄裡的章名照樣留著、點了跳到同一個位置。
+     posOf[path] = { base, resolve(frag) }；沒有內容的檔案 base 指向下一段內容。 */
+  function resolveToc(list, posOf, total) {
+    var out = [];
+    list.forEach(function (e) {
+      var pos = posOf[e.path];
+      if (!pos) return;   /* 不在 spine（例如 linear=no）的條目略過 */
+      var b = e.frag ? pos.resolve(e.frag) : pos.base;
+      if (b < 0) b = pos.base;
+      if (b >= total) b = total - 1;
+      if (b < 0) return;
+      out.push({ t: cleanTitle(e.label), lv: e.lv, b: b });
+    });
+    if (!out.length) return null;
+    var minLv = Math.min.apply(null, out.map(function (e) { return e.lv; }));
+    out.forEach(function (e) { e.lv -= minLv; });
+    return out;
   }
 
   /* ---------- 入口 ---------- */
@@ -585,7 +662,7 @@
   RD.parse = {
     /* 解析邏輯有實質改變就 +1：開書時發現存下來的版本比較舊，
        會自動用原始檔重新解析一次，使用者不必刪書重匯。 */
-    VERSION: 2,
+    VERSION: 3,
     decodeBuffer: decodeBuffer,
     normalize: normalize,
     txtToDoc: txtToDoc,

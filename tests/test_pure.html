@@ -172,6 +172,36 @@
     ok(n > 150, "開書第一個畫面就有正文（" + n + " 字）");
   }));
 
+  /* 多層目錄：篇 > 章 > 節。篇名頁只有一行，渲染單位會併掉它，但 doc.toc 要完整保留 */
+  function checkTree(name) {
+    return get("fixtures/" + name).then(function (b) {
+      return parse.parseFile(name, b);
+    }).then(function (r) {
+      var doc = r.doc, toc = doc.toc || [];
+      eq(toc.length, 12, name + "：目錄 12 條（2 篇 3 章 7 節）");
+      eq(toc.map(function (e) { return e.lv; }).join(""), "012221220122", name + "：層級保留");
+      eq(toc[0].t, "第一篇　單句", name + "：第一條是篇名");
+      eq(toc[1].t, "第一章　基本句型", name + "：章名還在（沒被併掉）");
+      eq(toc[3].t, "主部與述部", name + "：小節名");
+      ok(toc.every(function (e) { return doc.blocks[e.b] && doc.blocks[e.b].t === e.t; }),
+        name + "：每一條都指到同名的標題區塊");
+      ok(toc.every(function (e, i) { return i === 0 || e.b > toc[i - 1].b; }), name + "：位置依序遞增");
+      ok(doc.chapters.length < toc.length, name + "：渲染單位另外切（" + doc.chapters.length + " 段）");
+      ok(!doc.chapters.some(function (c) { return /^第一篇/.test(c.title); }), name + "：篇名頁已被併進渲染單位");
+    });
+  }
+  jobs.push(checkTree("tree.epub"));
+  jobs.push(checkTree("tree_ncx.epub"));
+  jobs.push(get("fixtures/sample.epub").then(function (b) { return parse.parseFile("sample.epub", b); }).then(function (r) {
+    var toc = r.doc.toc || [];
+    eq(toc.length, 2, "單層目錄：兩條");
+    ok(toc.every(function (e) { return e.lv === 0; }), "單層目錄：都在第 0 層");
+    ok(toc.every(function (e) { return r.doc.blocks[e.b] && /卷/.test(r.doc.blocks[e.b].t); }), "單層目錄：指到章名");
+  }));
+  jobs.push(get("fixtures/sample_utf8.txt").then(function (b) { return parse.parseFile("a.txt", b); }).then(function (r) {
+    ok(!r.doc.toc, "txt 沒有 doc.toc（沿用渲染單位當目錄）");
+  }));
+
   jobs.push(get("fixtures/sample_utf8.txt").then(function (b) {
     return parse.parseFile("x.epub", b).then(function () {
       ok(false, "非 zip 檔要報錯");

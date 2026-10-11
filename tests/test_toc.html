@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head><meta charset="UTF-8"><title>閱讀者：多層目錄端到端測試</title>
+<style>
+  body { font: 13px/1.6 monospace; margin: 0; }
+  #log { white-space: pre-wrap; padding: 8px; }
+  iframe { width: 420px; height: 640px; border: 1px solid #ccc; }
+</style>
+</head>
+<body>
+<pre id="log">RUNNING</pre>
+<iframe id="app"></iframe>
+<script>
+(function () {
+  var lines = [], pass = 0, fail = 0;
+  var logEl = document.getElementById("log");
+
+  function flush(tag) {
+    logEl.textContent = lines.join("\n") + "\n" + tag + " PASS=" + pass + " FAIL=" + fail;
+  }
+  function ok(cond, name, extra) {
+    if (cond) { pass++; lines.push("[O] " + name); }
+    else { fail++; lines.push("[X] " + name + (extra !== undefined ? "  << " + extra : "")); }
+    flush("PARTIAL");
+  }
+  function eq(a, b, name) { ok(a === b, name, JSON.stringify(a) + " != " + JSON.stringify(b)); }
+  function info(m) { lines.push("    " + m); flush("PARTIAL"); }
+
+  function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  function until(fn, label, timeout) {
+    timeout = timeout || 15000;
+    var t0 = Date.now();
+    return new Promise(function (resolve, reject) {
+      (function tick() {
+        var v;
+        try { v = fn(); } catch (e) { v = null; }
+        if (v) { resolve(v); return; }
+        if (Date.now() - t0 > timeout) { reject(new Error("等不到：" + label)); return; }
+        setTimeout(tick, 30);
+      })();
+    });
+  }
+
+  /* ---------- 準備乾淨環境 ---------- */
+
+  function wipe() {
+    try { localStorage.removeItem("reader-settings-v1"); } catch (e) { /* 忽略 */ }
+    return new Promise(function (resolve) {
+      var req = indexedDB.deleteDatabase("reader-db");
+      req.onsuccess = req.onerror = req.onblocked = function () { resolve(); };
+      setTimeout(resolve, 2000);
+    });
+  }
+
+  var frame = document.getElementById("app");
+
+  function loadApp() {
+    return new Promise(function (resolve) {
+      frame.onload = function () { resolve(frame.contentWindow); };
+      frame.src = "../index.html?test=1";
+    }).then(function (win) {
+      return until(function () { return win.RD && win.RD.db && win.document.getElementById("shelf-list") ? win : null; }, "app 載入").then(function () { return win; });
+    });
+  }
+
+  function reloadApp() {
+    return new Promise(function (resolve) {
+      frame.onload = function () { resolve(frame.contentWindow); };
+      frame.contentWindow.location.reload();
+    }).then(function (win) {
+      return until(function () { return win.RD && win.RD.db ? win : null; }, "app 重新載入").then(function () { return win; });
+    });
+  }
+
+  /* ---------- 語音替身 ---------- */
+
+  function installSpeechStub(win) {
+    var spoken = [];
+    function Utter(text) {
+      this.text = text; this.lang = ""; this.voice = null;
+      this.rate = 1; this.pitch = 1; this.volume = 1;
+      this.onend = null; this.onerror = null;
+    }
+    var synth = {
+      speaking: false,
+      paused: false,
+      pending: false,
+      getVoices: function () { return []; },
+      speak: function (u) {
+        spoken.push({ text: u.text, lang: u.lang });
+        setTimeout(function () { if (u.onend) u.onend({}); }, 1);
+      },
+      cancel: function () { },
+      pause: function () { },
+      resume: function () { },
+      addEventListener: function () { },
+      onvoiceschanged: null
+    };
+    /* speechSynthesis 是唯讀 getter，必須用 defineProperty 才蓋得過去 */
+    Object.defineProperty(win, "speechSynthesis", { configurable: true, value: synth });
+    Object.defineProperty(win, "SpeechSynthesisUtterance", { configurable: true, value: Utter });
+    return spoken;
+  }
+
+  /* ---------- 螢幕常亮替身 ---------- */
+
+  /* 假 Wake Lock：記錄要了幾次、手上的鎖；fire() 模擬系統收回。 */
+  function installWakeStub(win) {
+    var w = { requests: 0, locks: [] };
+    function Lock() {
+      var self = this, handlers = [];
+      this.released = false;
+      this.addEventListener = function (ev, fn) { if (ev === "release") handlers.push(fn); };
+      this.fire = function () {
+        if (self.released) return;
+        self.released = true;
+        handlers.forEach(function (fn) { fn({}); });
+      };
+      this.release = function () { self.fire(); return Promise.resolve(); };
+    }
+    Object.defineProperty(win.navigator, "wakeLock", {
+      configurable: true,
+      value: { request: function () { w.requests++; var l = new Lock(); w.locks.push(l); return Promise.resolve(l); } }
+    });
+    w.held = function () { return w.locks.filter(function (l) { return !l.released; }).length; };
+    return w;
+  }
+
+  function setVisibility(win, st) {
+    Object.defineProperty(win.document, "visibilityState", { configurable: true, get: function () { return st; } });
+    win.document.dispatchEvent(new win.Event("visibilitychange"));
+  }
+
+  /* ---------- 匯入檔案 ---------- */
+
+  function importFixture(win, name, type) {
+    return fetch("fixtures/" + name).then(function (r) { return r.arrayBuffer(); }).then(function (buf) {
+      var doc = win.document;
+      var input = doc.getElementById("file-input");
+      var file = new win.File([new Uint8Array(buf)], name, { type: type || "text/plain" });
+      var dt = new win.DataTransfer();
+      dt.items.add(file);
+      input.files = dt.files;
+      input.dispatchEvent(new win.Event("change"));
+      return until(function () {
+        return /已匯入/.test(doc.getElementById("import-status").textContent) ? true : null;
+      }, "匯入完成 " + name);
+    });
+  }
+
+  function readBook(win, cb) {
+    return new Promise(function (resolve, reject) {
+      var req = win.indexedDB.open("reader-db");
+      req.onsuccess = function () {
+        var db = req.result;
+        var t = db.transaction(["books"], "readonly");
+        var g = t.objectStore("books").getAll();
+        g.onsuccess = function () { resolve(cb ? cb(g.result) : g.result); };
+        g.onerror = function () { reject(g.error); };
+      };
+      req.onerror = function () { reject(req.error); };
+    });
+  }
+
+  /* ---------- 測試流程 ---------- */
+
+  var win;
+
+  function openBook(re) {
+    var doc = win.document;
+    var items = Array.prototype.slice.call(doc.querySelectorAll("#shelf-list li"));
+    var target = items.filter(function (li) { return re.test(li.textContent); })[0];
+    target.querySelector(".b-main").click();
+    return until(function () {
+      return re.test(doc.getElementById("read-title").textContent) &&
+        doc.querySelectorAll("#content .blk").length > 0 ? true : null;
+    }, "開書 " + re);
+  }
+
+  function visibleToc() {
+    return Array.prototype.slice.call(win.document.querySelectorAll("#toc-list li")).filter(function (li) {
+      return !li.classList.contains("hidden");
+    });
+  }
+
+  function tocItem(text) {
+    return Array.prototype.slice.call(win.document.querySelectorAll("#toc-list li")).filter(function (li) {
+      return li.querySelector(".t-name") && li.querySelector(".t-name").textContent === text;
+    })[0];
+  }
+
+  function headingNearTop(text) {
+    var doc = win.document;
+    var c = doc.getElementById("content");
+    var h = Array.prototype.slice.call(c.querySelectorAll(".blk.h")).filter(function (x) { return x.textContent === text; })[0];
+    if (!h) return false;
+    var d = h.getBoundingClientRect().top - c.getBoundingClientRect().top;
+    return d > -20 && d < 40;
+  }
+
+  wipe().then(loadApp).then(function (w) {
+    win = w;
+    return importFixture(win, "tree.epub", "application/epub+zip");
+  }).then(function () {
+    return importFixture(win, "sample.epub", "application/epub+zip");
+  }).then(function () {
+    return openBook(/多層目錄測試/);
+  }).then(function () {
+    var doc = win.document;
+    doc.getElementById("toc-btn").click();
+    ok(!doc.getElementById("sheet-toc").classList.contains("hidden"), "目錄面板打開");
+    ok(doc.getElementById("toc-list").classList.contains("tree"), "多層目錄模式");
+    eq(doc.querySelectorAll("#toc-list li").length, 12, "目錄共 12 條");
+    var vis = visibleToc().map(function (li) { return li.querySelector(".t-name").textContent; });
+    eq(vis.join("|"), "第一篇　單句|第一章　基本句型|第二章　名詞片語|第二篇　複句|第三章　合句", "預設只顯示篇與章（小節收合）");
+    ok(tocItem("第一章　基本句型").querySelector(".t-fold").textContent === "▸", "章有展開鈕");
+    eq(tocItem("第一篇　單句").querySelector(".t-fold").textContent, "", "篇沒有展開鈕（章本來就看得到）");
+    ok(tocItem("第一篇　單句").classList.contains("on"), "開書位置標在第一篇");
+    tocItem("第一章　基本句型").querySelector(".t-fold").click();
+    ok(!doc.getElementById("sheet-toc").classList.contains("hidden"), "按展開鈕不會關掉目錄");
+    eq(visibleToc().length, 8, "展開第一章後多出 3 個小節");
+    ok(tocItem("第一章　基本句型").querySelector(".t-fold").textContent === "▾", "展開鈕變成收合狀態");
+    tocItem("補語").click();
+    return until(function () { return doc.getElementById("sheet-toc").classList.contains("hidden") ? true : null; }, "點小節後目錄關閉");
+  }).then(function () {
+    return wait(400);
+  }).then(function () {
+    var doc = win.document;
+    ok(headingNearTop("補語"), "跳到小節「補語」所在位置");
+    tocItem("第一章　基本句型").querySelector(".t-fold").click();
+    eq(visibleToc().length, 5, "收合第一章");
+    doc.getElementById("toc-btn").click();
+    ok(tocItem("補語").classList.contains("on"), "重開目錄：目前位置標在「補語」");
+    ok(!tocItem("補語").classList.contains("hidden"), "重開目錄：目前所在的章自動展開");
+    tocItem("第三章　合句").click();
+    return wait(400);
+  }).then(function () {
+    var doc = win.document;
+    ok(headingNearTop("第三章　合句"), "點章名跳到該章");
+    ok(/合句/.test(doc.getElementById("read-chapter").textContent), "標題列顯示第三章");
+    return wait(300).then(function () { return reloadApp(); });
+  }).then(function (w) {
+    win = w;
+    return until(function () { return win.document.querySelectorAll("#shelf-list li").length === 2 ? true : null; }, "重新載入後書架");
+  }).then(function () {
+    var doc = win.document;
+    if (!doc.getElementById("view-read").classList.contains("hidden")) return null;
+    return openBook(/多層目錄測試/);
+  }).then(function () {
+    var doc = win.document;
+    ok(headingNearTop("第三章　合句"), "重新載入後回到第三章");
+    doc.getElementById("toc-btn").click();
+    eq(doc.querySelectorAll("#toc-list li").length, 12, "重新載入後目錄仍在（存進資料庫）");
+    ok(tocItem("第三章　合句").classList.contains("on"), "重新載入後標在第三章");
+    doc.querySelector('[data-close="sheet-toc"]').click();
+    doc.getElementById("back-btn").click();
+    return until(function () { return !doc.getElementById("view-shelf").classList.contains("hidden") ? true : null; }, "回書架");
+  }).then(function () {
+    return openBook(/測試書名/);
+  }).then(function () {
+    var doc = win.document;
+    doc.getElementById("toc-btn").click();
+    ok(!doc.getElementById("toc-list").classList.contains("tree"), "單層目錄不套多層樣式");
+    eq(visibleToc().length, 2, "單層目錄兩條全部顯示");
+    eq(doc.querySelectorAll("#toc-list .t-fold").length && Array.prototype.slice.call(doc.querySelectorAll("#toc-list .t-fold")).map(function (x) { return x.textContent; }).join(""), "", "單層目錄沒有展開鈕");
+    ok(!!doc.querySelector('#toc-list li[data-ci="0"]'), "條目仍帶 data-ci（相容舊測試）");
+    flush("DONE");
+  }).catch(function (e) {
+    fail++;
+    lines.push("[X] 測試中斷：" + (e && e.message ? e.message : e));
+    if (e && e.stack) lines.push(String(e.stack).split("\n").slice(0, 4).join("\n"));
+    flush("DONE");
+  });
+
+  flush("PARTIAL");
+})();
+</script>
+</body>
+</html>

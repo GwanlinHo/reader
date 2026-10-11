@@ -5,6 +5,7 @@ cd "$(dirname "$0")"
 fail=0
 echo "===== 純函式測試 ====="; ./run_pure.sh || fail=1
 echo; echo "===== 端到端測試 ====="; ./run_e2e.sh || fail=1
+echo; echo "===== 多層目錄測試 ====="; ./run_toc.sh || fail=1
 echo; echo "===== 解析器升級測試 ====="; ./run_upgrade.sh || fail=1
 echo; echo "===== PDF 測試 ====="; ./run_pdf.sh || fail=1
 echo; echo "===== PDF 端到端測試 ====="; ./run_pdfe2e.sh || fail=1

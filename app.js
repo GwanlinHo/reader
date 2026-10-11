@@ -345,6 +345,7 @@
               chapters: doc.chapters,
               totalChars: doc.totalChars,
               pageStart: r.pageStart || [],
+              toc: doc.toc || null,
               parserVersion: RD.parse.VERSION,
               pdfVersion: r.format === "pdf" ? RD.pdfdoc.VERSION : 0
             })
@@ -379,6 +380,7 @@
         cur.book = bk;
         cur.doc = doc;
         cur.prefix = buildPrefix(doc.blocks);
+        cur.tocOpen = {};
         settings.lastBook = id;
         saveSettings();
         return RD.db.annotsOf(id).then(function (list) {
@@ -402,6 +404,8 @@
      這裡在開書時偵測版本差異，用原始檔重新解析，並把閱讀位置與註解接回去。 */
   function upgradeDoc(bk, doc) {
     var needed = !doc || !doc.blocks || !doc.blocks.length || doc.parserVersion !== RD.parse.VERSION;
+    /* v3 只改了 epub 的多層目錄，txt／PDF 解析結果沒變，不必重新解析（PDF 重解很慢又要連網） */
+    if (needed && doc && doc.blocks && doc.blocks.length && bk.format !== "epub" && doc.parserVersion === 2) needed = false;
     if (!needed && bk.format === "pdf" && (doc.pdfVersion || 0) !== RD.pdfdoc.VERSION) needed = true;
     if (!needed) return Promise.resolve(doc);
     return RD.db.getFile(bk.id).then(function (rec) {
@@ -416,6 +420,7 @@
           chapters: nd.chapters,
           totalChars: nd.totalChars,
           pageStart: r.pageStart || [],
+          toc: nd.toc || null,
           parserVersion: RD.parse.VERSION,
           pdfVersion: r.format === "pdf" ? RD.pdfdoc.VERSION : 0
         };
@@ -554,13 +559,25 @@
 
     el.content.textContent = "";
     el.content.appendChild(frag);
-    el.readChapter.textContent = (ci + 1) + "／" + chs.length + "　" + ch.title;
+    el.readChapter.textContent = (ci + 1) + "／" + chs.length + "　" + chapterLabel(ch, anchor);
     markTocActive();
 
     if (anchor) scrollToAnchor(anchor);
     else if (toEnd) el.content.scrollTop = el.content.scrollHeight;
     else el.content.scrollTop = 0;
     updateProgressLabel();
+  }
+
+  /* 有多層目錄時，標題列顯示目錄裡的章名（收合線以上最近的那一條），
+     而不是渲染單位的名字——單位可能被併過，名字會是某個小節 */
+  function chapterLabel(ch, anchor) {
+    if (!hasTocTree()) return ch.title;
+    var toc = cur.doc.toc;
+    var fold = tocFoldLevel(toc);
+    var i = tocIndexOf(anchor ? anchor.b : ch.start);
+    while (i > 0 && toc[i].lv >= fold) i--;
+    if (toc[i].b > (anchor ? anchor.b : ch.start)) return ch.title;   /* 還在第一條目錄之前（封面等） */
+    return toc[i].t;
   }
 
   function scrollToAnchor(anchor) {
@@ -659,6 +676,7 @@
 
   function buildToc() {
     el.tocList.textContent = "";
+    el.tocList.classList.remove("tree");
     if (cur.pdfPage && !pageViewHasDoc()) {
       var total = cur.pdfPage.count;
       for (var n = 1; n <= total; n++) {
@@ -675,6 +693,7 @@
       }
       return;
     }
+    if (hasTocTree()) { buildTocTree(); return; }
     cur.doc.chapters.forEach(function (ch, i) {
       var li = document.createElement("li");
       var name = document.createElement("span");
@@ -700,7 +719,124 @@
     markTocActive();
   }
 
+  /* 書本自帶的多層目錄（epub 的 nav／ncx）。跟渲染單位分開：
+     只有一行章名的頁面會被併進下一段，但目錄裡照樣看得到、點得到。 */
+  function hasTocTree() {
+    return !!(cur.doc && cur.doc.toc && cur.doc.toc.length && !cur.pdfPage);
+  }
+
+  /* 第幾層以下預設收合：只有一層不收；兩層收第二層；三層以上只留前兩層 */
+  function tocFoldLevel(toc) {
+    var maxLv = 0;
+    toc.forEach(function (e) { if (e.lv > maxLv) maxLv = e.lv; });
+    return maxLv === 0 ? Infinity : Math.min(maxLv, 2);
+  }
+
+  function buildTocTree() {
+    var toc = cur.doc.toc;
+    var fold = tocFoldLevel(toc);
+    cur.tocOpen = cur.tocOpen || {};
+    el.tocList.classList.toggle("tree", fold !== Infinity);
+    toc.forEach(function (e, i) {
+      var li = document.createElement("li");
+      li.className = "lv" + Math.min(e.lv, 4);
+      li.setAttribute("data-ti", String(i));
+      li.setAttribute("data-ci", String(chapterOf(e.b)));
+      var hasKids = i + 1 < toc.length && toc[i + 1].lv > e.lv && toc[i + 1].lv >= fold;
+      var tg = document.createElement("span");
+      tg.className = "t-fold";
+      if (hasKids) {
+        tg.setAttribute("role", "button");
+        tg.setAttribute("aria-label", "展開或收合小節");
+        tg.addEventListener("click", function (ev) {
+          ev.stopPropagation();
+          cur.tocOpen[i] = !cur.tocOpen[i];
+          applyTocFold();
+        });
+      }
+      li.appendChild(tg);
+      var name = document.createElement("span");
+      name.className = "t-name";
+      name.textContent = e.t;
+      li.appendChild(name);
+      var p = document.createElement("span");
+      p.className = "t-pct";
+      p.textContent = pct((cur.prefix[e.b] || 0) / (cur.doc.totalChars || 1)) + "%";
+      li.appendChild(p);
+      li.addEventListener("click", function () {
+        closeSheet("sheet-toc");
+        RD.speech.stop();
+        renderChapter(chapterOf(e.b), { b: e.b, o: 0 });
+        saveProgress({ b: e.b, o: 0 });
+      });
+      el.tocList.appendChild(li);
+    });
+    applyTocFold();
+  }
+
+  /* 某條要顯示 ＝ 層級在收合線以上，或往上每一層收合線以下的祖先都已展開 */
+  function applyTocFold() {
+    var toc = cur.doc.toc;
+    var fold = tocFoldLevel(toc);
+    var items = el.tocList.querySelectorAll("li");
+    var stack = [];   /* stack[lv] = 該層最近一條的索引 */
+    for (var i = 0; i < toc.length; i++) {
+      var lv = toc[i].lv;
+      stack.length = lv;
+      var show = true;
+      for (var k = fold - 1; k < lv; k++) {
+        if (k < 0) continue;
+        var anc = stack[k];
+        if (anc === undefined || !cur.tocOpen[anc]) { show = false; break; }
+      }
+      stack[lv] = i;
+      if (!items[i]) continue;
+      items[i].classList.toggle("hidden", !show);
+      var hasKids = i + 1 < toc.length && toc[i + 1].lv > lv && toc[i + 1].lv >= fold;
+      var tg = items[i].firstChild;
+      tg.textContent = hasKids ? (cur.tocOpen[i] ? "\u25BE" : "\u25B8") : "";
+    }
+  }
+
+  /* 目前位置落在哪一條：區塊索引不超過目前位置的最後一條 */
+  function tocIndexOf(b) {
+    var toc = cur.doc.toc, here = 0;
+    for (var i = 0; i < toc.length; i++) {
+      if (toc[i].b <= b) here = i;
+      else break;
+    }
+    return here;
+  }
+
+  /* 只在打開目錄時呼叫：這時閱讀畫面已經捲好，currentAnchor 才準 */
+  function markTocTree() {
+    var toc = cur.doc.toc;
+    var b = currentAnchor().b;
+    var here = tocIndexOf(b);
+    /* 自動展開目前位置所在的分支 */
+    var fold = tocFoldLevel(toc);
+    var lv = toc[here].lv;
+    for (var i = here; i >= 0 && lv >= fold; i--) {
+      if (toc[i].lv < lv) {
+        lv = toc[i].lv;
+        cur.tocOpen[i] = true;
+      }
+    }
+    applyTocFold();
+    var items = el.tocList.querySelectorAll("li");
+    for (var j = 0; j < items.length; j++) {
+      items[j].classList.toggle("on", j === here);
+    }
+    if (items[here] && items[here].scrollIntoView) {
+      try { items[here].scrollIntoView({ block: "nearest" }); } catch (e) { /* 忽略 */ }
+    }
+  }
+
   function markTocActive() {
+    if (hasTocTree()) {
+      if (!$("sheet-toc").classList.contains("hidden")) markTocTree();
+      return;
+    }
     var here;
     if (pageViewHasDoc()) here = chapterOf(RD.pdfdoc.blockOfPage(cur.doc.pageStart, cur.pdfPage.page));
     else here = cur.pdfPage ? (cur.pdfPage.page - 1) : cur.chapter;
@@ -1398,7 +1534,10 @@
       saveProgress().then(renderShelf);
       showView("shelf");
     });
-    $("toc-btn").addEventListener("click", function () { openSheet("sheet-toc"); });
+    $("toc-btn").addEventListener("click", function () {
+      openSheet("sheet-toc");
+      if (hasTocTree()) markTocTree();
+    });
     el.viewBtn.addEventListener("click", function () { toggleView(); });
     $("annots-btn").addEventListener("click", function () { renderAnnotList(); openSheet("sheet-annots"); });
     $("add-annot-btn").addEventListener("click", addAnnotFromSelection);
