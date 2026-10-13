@@ -19,13 +19,14 @@
     onStatus: null,       /* function(text) 狀態列訊息 */
     onEnd: null,          /* function() 全部唸完 */
     onWake: null,         /* function(info) 螢幕常亮狀態改變 */
-    settings: null        /* function() -> { rate, voiceZh, voiceEn, keepAwake } */
+    settings: null        /* function() -> { rate, rateEn, voiceZh, voiceEn, keepAwake } */
   };
 
   function conf() {
     var s = (opts.settings && opts.settings()) || {};
     return {
       rate: typeof s.rate === "number" ? s.rate : 1,
+      rateEn: typeof s.rateEn === "number" ? s.rateEn : (typeof s.rate === "number" ? s.rate : 1),
       voiceZh: s.voiceZh || "",
       voiceEn: s.voiceEn || "",
       keepAwake: s.keepAwake !== false
@@ -111,6 +112,12 @@
     return list[0] || null;
   }
 
+  /* 中英語速分開：英文語音在同樣倍率下通常比中文快 */
+  function rateFor(lang) {
+    var c = conf();
+    return lang === "en" ? c.rateEn : c.rate;
+  }
+
   function buildUtterance(text, lang, withVoice) {
     var u = new SpeechSynthesisUtterance(text);
     var v = withVoice === false ? null : pickVoice(lang);
@@ -120,7 +127,7 @@
     } else {
       u.lang = lang === "en" ? "en-US" : "zh-TW";
     }
-    u.rate = conf().rate;
+    u.rate = rateFor(lang);
     u.pitch = 1;
     u.volume = 1;
     return u;
@@ -350,7 +357,7 @@
   function speakItem(item, epoch, withVoice) {
     var u = buildUtterance(item.say, item.lang, withVoice);
     var advanced = false;
-    var guard = setTimeout(advance, 8000 + Math.round(item.say.length * 800 / conf().rate));
+    var guard = setTimeout(advance, 8000 + Math.round(item.say.length * 800 / rateFor(item.lang)));
 
     function advance() {
       if (advanced) return;

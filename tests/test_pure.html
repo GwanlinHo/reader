@@ -60,6 +60,33 @@
   eq(r3.length, 1, "純英文一段");
   eq(r3[0].lang, "en", "純英文標成 en");
 
+  /* ---------- 句內停頓 ---------- */
+  var k1 = "我們先吃飯，然後去看電影；回來再說。";
+  var cl1 = seg.splitClauses(k1);
+  eq(cl1.length, 3, "逗號、分號處切成三段");
+  eq(cl1.map(function (c) { return c.t; }).join(""), k1, "子句接回來等於原文");
+  ok(cl1.every(function (c) { return k1.substr(c.o, c.t.length) === c.t; }), "子句位移對得上原文");
+  eq(seg.splitClauses("好，我知道了").length, 1, "標點前只有一個字不切");
+  eq(seg.splitClauses("我知道了，好").length, 1, "標點後只有一個字不切");
+  eq(seg.splitClauses("共 1,000 元，時間 12:30 到").length, 2, "千分位逗號與時間冒號不切");
+  var ce = seg.splitClauses("However, he went home, and slept.");
+  eq(ce.length, 3, "英文逗號也切");
+  eq(ce[1].t, "he went home, ", "切點吃掉標點後的空白");
+  eq(seg.splitClauses("A, B and C").length, 1, "英文單一字母不切");
+
+  var sp1 = seg.speechParts("我們先吃飯，然後去看電影。");
+  eq(sp1.length, 2, "speechParts：一句兩段");
+  ok(sp1[0].brk === true && sp1[1].brk === false, "第一段後要短停頓，最後一段不算");
+  ok(sp1.every(function (p) { return !/[，。]/.test(p.say); }), "片段已清掉標點");
+  eq(sp1[1].o, 6, "片段位移正確");
+  var sp2 = seg.speechParts("這個 PWA 很好用，我每天都開。");
+  ok(sp2.every(function (p) { return p.lang === "zh"; }), "短英文詞仍留在中文段（語言判斷維持整句）");
+  var sp3 = seg.speechParts("他說 The quick brown fox jumps over the lazy dog, every morning. 然後笑了。");
+  ok(sp3.some(function (p) { return p.lang === "en" && p.brk; }), "英文段內的逗號也會停頓");
+  ok(!sp3.some(function (p) { return p.lang === "en" && /[\u4e00-\u9fff]/.test(p.say); }), "英文片段不夾中文");
+  var sp4 = seg.speechParts("「好，」他說。");
+  eq(sp4.length, 1, "太短的不切");
+
   /* ---------- 朗讀前清洗 ---------- */
   var c1 = seg.stripSpeechPunctuation("他說：「這個 PWA 很好用。」");
   ok(c1.indexOf("：") < 0 && c1.indexOf("「") < 0 && c1.indexOf("。") < 0, "全形標點被清掉");

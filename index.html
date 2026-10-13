@@ -106,8 +106,12 @@
 
     <h3>朗讀</h3>
     <div class="field">
-      <label for="rate-range">速度 <span id="rate-val" class="val"></span></label>
+      <label for="rate-range">中文語速 <span id="rate-val" class="val"></span></label>
       <input id="rate-range" type="range" min="0.6" max="1.6" step="0.05">
+    </div>
+    <div class="field">
+      <label for="rate-en-range">英文語速 <span id="rate-en-val" class="val"></span></label>
+      <input id="rate-en-range" type="range" min="0.6" max="1.6" step="0.05">
     </div>
     <div class="field"><label for="voice-zh">中文語音</label><select id="voice-zh"></select></div>
     <div class="field"><label for="voice-en">英文語音</label><select id="voice-en"></select></div>
@@ -144,7 +148,7 @@
 <div id="sheet-about" class="sheet hidden">
   <div class="sheet-box">
     <div class="sheet-head"><h2>說明</h2><button class="close-btn" data-close="sheet-about">關閉</button></div>
-    <p class="note small">版本 <span id="build-id">reader-v12</span>（回報問題時請一併告知，可用來確認手上是不是最新版）</p>
+    <p class="note small">版本 <span id="build-id">reader-v13</span>（回報問題時請一併告知，可用來確認手上是不是最新版）</p>
     <p>閱讀者是一個純本機的電子書閱讀器，支援 txt 與 epub。</p>
     <ul class="bullets">
       <li>匯入時會把檔案複製到本機儲存空間，之後開啟不必再選檔，自動回到上次讀的位置。</li>

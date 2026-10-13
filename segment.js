@@ -216,8 +216,65 @@
     return out.replace(/\s+/g, " ").trim();
   }
 
+  /* ---------- 句內停頓 ---------- */
+
+  /* 逗號類標點：句子在這裡切開分段送出，中間由朗讀佇列插短停頓。
+   * 標點兩側都要有 MIN_CLAUSE 個以上的字（漢字或英數字）才切，避免切成一兩個字的碎片。 */
+  var CLAUSE_PUNCT = "，、；：,;:";
+  var MIN_CLAUSE = 2;
+
+  function solidCount(t) {
+    var n = 0;
+    for (var i = 0; i < t.length; i++) {
+      if (isCJK(t[i]) || isLatinLetter(t[i]) || isDigit(t[i])) n++;
+    }
+    return n;
+  }
+
+  /* 回傳 [{ t, o }]，o 為在 text 中的位移；切點落在標點（含後面的空白）之後 */
+  function splitClauses(text) {
+    var out = [];
+    if (!text) return out;
+    var start = 0;
+    for (var i = 0; i < text.length; i++) {
+      var c = text[i];
+      if (CLAUSE_PUNCT.indexOf(c) < 0) continue;
+      var prev = i > 0 ? text[i - 1] : "";
+      var next = i + 1 < text.length ? text[i + 1] : "";
+      if ((c === "," || c === ":") && isDigit(prev) && isDigit(next)) continue;   /* 1,000、12:30 */
+      var end = i + 1;
+      while (end < text.length && /\s/.test(text[end])) end++;
+      if (solidCount(text.slice(start, i)) < MIN_CLAUSE) continue;
+      if (solidCount(text.slice(end)) < MIN_CLAUSE) continue;
+      out.push({ t: text.slice(start, end), o: start });
+      start = end;
+      i = end - 1;
+    }
+    if (start < text.length) out.push({ t: text.slice(start), o: start });
+    return out;
+  }
+
+  /* 一句話變成朗讀片段：[{ say, lang, o, brk }]
+   * 先依整句判語言（保留中英門檻不對稱的決定），再把每個語言段在逗號類標點切開。
+   * brk：片段結尾是逗號類標點，後面該插短停頓（最後一段不算，句末停頓另外處理）。 */
+  function speechParts(sentence, opts) {
+    var parts = [];
+    langRuns(sentence, opts).forEach(function (run) {
+      splitClauses(run.t).forEach(function (c) {
+        var say = stripSpeechPunctuation(c.t);
+        if (!say) return;
+        var tail = c.t.replace(/[\s」』）】〉》”’"')\]]+$/, "");
+        parts.push({ say: say, lang: run.lang, o: run.o + c.o, brk: CLAUSE_PUNCT.indexOf(tail.slice(-1)) >= 0 });
+      });
+    });
+    if (parts.length) parts[parts.length - 1].brk = false;
+    return parts;
+  }
+
   RD.seg = {
     splitSentences: splitSentences,
+    splitClauses: splitClauses,
+    speechParts: speechParts,
     langRuns: langRuns,
     stripSpeechPunctuation: stripSpeechPunctuation,
     isCJK: isCJK,

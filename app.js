@@ -36,12 +36,16 @@
   ];
 
   var PAGE_OVERLAP = 46;     /* 翻一頁保留的重疊像素，避免漏讀一行 */
-  var BLOCK_PAUSE = 260;     /* 段落之間的停頓（毫秒）；標點已清掉，停頓靠這裡 */
+  /* 朗讀停頓（毫秒）。標點送 TTS 前已清掉，停頓全靠佇列插入。
+     iOS 每段語音本身還有啟動延遲，實際聽到的會比這裡長一點，所以逗號那級刻意設短。 */
+  var CLAUSE_PAUSE = 150;    /* 逗號、頓號、分號、冒號 */
+  var SENT_PAUSE = 350;      /* 句號、問號、驚嘆號 */
+  var BLOCK_PAUSE = 500;     /* 段落之間 */
   var MANUAL_SCROLL_HOLD = 5000;   /* 手動捲動後暫停自動捲動的時間 */
 
   var settings = {
     font: 2, line: 2, family: "sans", theme: "paper",
-    rate: 1, voiceZh: "", voiceEn: "", keepAwake: true, tapMode: "edge",
+    rate: 1, rateEn: 0.85, voiceZh: "", voiceEn: "", keepAwake: true, tapMode: "edge",
     lastBook: ""
   };
 
@@ -75,6 +79,7 @@
       if (s.family === "sans" || s.family === "serif") settings.family = s.family;
       if (THEMES.some(function (t) { return t.key === s.theme; })) settings.theme = s.theme;
       if (typeof s.rate === "number" && s.rate >= 0.6 && s.rate <= 1.6) settings.rate = s.rate;
+      if (typeof s.rateEn === "number" && s.rateEn >= 0.6 && s.rateEn <= 1.6) settings.rateEn = s.rateEn;
       if (typeof s.voiceZh === "string") settings.voiceZh = s.voiceZh;
       if (typeof s.voiceEn === "string") settings.voiceEn = s.voiceEn;
       settings.keepAwake = s.keepAwake !== false;
@@ -103,6 +108,10 @@
     if (el.rate) {
       el.rate.value = String(settings.rate);
       el.rateVal.textContent = settings.rate.toFixed(2) + " 倍";
+    }
+    if (el.rateEn) {
+      el.rateEn.value = String(settings.rateEn);
+      el.rateEnVal.textContent = settings.rateEn.toFixed(2) + " 倍";
     }
     if (el.keepAwake) el.keepAwake.checked = settings.keepAwake;
     markSegs();
@@ -1249,8 +1258,19 @@
 
   /* ---------- 朗讀 ---------- */
 
+  /* 一句話的朗讀項目：語言片段在逗號類標點處切開，中間插短停頓 */
+  function sentenceItems(items, text, b, o) {
+    var parts = seg.speechParts(text);
+    for (var j = 0; j < parts.length; j++) {
+      items.push({ say: parts[j].say, lang: parts[j].lang, b: b, o: o });
+      if (parts[j].brk) items.push({ pause: CLAUSE_PAUSE });
+    }
+    return parts.length;
+  }
+
   /* 把區塊切成「句子 → 語言片段」的朗讀佇列。
-   * 送 TTS 的文字已清掉標點（Android 會把標點唸出來），停頓靠佇列的 pause 項。 */
+   * 送 TTS 的文字已清掉標點（Android 會把標點唸出來），停頓靠佇列的 pause 項：
+   * 句內逗號類 CLAUSE_PAUSE、句與句之間 SENT_PAUSE、段落之間 BLOCK_PAUSE。 */
   function buildItems(ci, fromAnchor) {
     var ch = cur.doc.chapters[ci];
     var items = [];
@@ -1260,15 +1280,12 @@
       var text = cur.doc.blocks[b].t;
       var sents = seg.splitSentences(text);
       if (!sents.length) sents = [{ t: text, o: 0 }];
+      var spoke = false;
       for (var i = 0; i < sents.length; i++) {
         var s = sents[i];
         if (fromAnchor && b === fromAnchor.b && s.o + s.t.length <= fromAnchor.o) continue;
-        var runs = seg.langRuns(s.t);
-        for (var j = 0; j < runs.length; j++) {
-          var say = seg.stripSpeechPunctuation(runs[j].t);
-          if (!say) continue;
-          items.push({ say: say, lang: runs[j].lang, b: b, o: s.o });
-        }
+        if (spoke) items.push({ pause: SENT_PAUSE });
+        if (sentenceItems(items, s.t, b, s.o)) spoke = true;
       }
       items.push({ pause: BLOCK_PAUSE });
     }
@@ -1408,11 +1425,9 @@
   function testVoices() {
     var sentence = "這是中文語音測試，and this line is read by the English voice.";
     var items = [];
-    seg.splitSentences(sentence).forEach(function (s) {
-      seg.langRuns(s.t).forEach(function (r) {
-        var say = seg.stripSpeechPunctuation(r.t);
-        if (say) items.push({ say: say, lang: r.lang, b: -1, o: -1 });
-      });
+    seg.splitSentences(sentence).forEach(function (s, i) {
+      if (i) items.push({ pause: SENT_PAUSE });
+      sentenceItems(items, s.t, -1, -1);
     });
     /* once：試聽唸完就停，不要接著唸書（在書架上沒開書時也不會去取下一章） */
     RD.speech.play(items, { once: true });
@@ -1604,6 +1619,11 @@
       el.rateVal.textContent = settings.rate.toFixed(2) + " 倍";
       saveSettings();
     });
+    el.rateEn.addEventListener("input", function () {
+      settings.rateEn = parseFloat(el.rateEn.value);
+      el.rateEnVal.textContent = settings.rateEn.toFixed(2) + " 倍";
+      saveSettings();
+    });
     el.voiceZh.addEventListener("change", function () { settings.voiceZh = el.voiceZh.value; saveSettings(); });
     el.voiceEn.addEventListener("change", function () { settings.voiceEn = el.voiceEn.value; saveSettings(); });
     el.keepAwake.addEventListener("change", function () {
@@ -1722,6 +1742,8 @@
     el.themeGroup = $("theme-group");
     el.rate = $("rate-range");
     el.rateVal = $("rate-val");
+    el.rateEn = $("rate-en-range");
+    el.rateEnVal = $("rate-en-val");
     el.voiceZh = $("voice-zh");
     el.voiceEn = $("voice-en");
     el.voiceNote = $("voice-note");
@@ -1748,6 +1770,7 @@
       settings: function () {
         return {
           rate: settings.rate,
+          rateEn: settings.rateEn,
           voiceZh: settings.voiceZh,
           voiceEn: settings.voiceEn,
           keepAwake: settings.keepAwake

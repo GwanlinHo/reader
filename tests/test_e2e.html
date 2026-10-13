@@ -88,7 +88,7 @@
       pending: false,
       getVoices: function () { return []; },
       speak: function (u) {
-        spoken.push({ text: u.text, lang: u.lang });
+        spoken.push({ text: u.text, lang: u.lang, rate: u.rate });
         setTimeout(function () { if (u.onend) u.onend({}); }, 1);
       },
       cancel: function () { },
@@ -556,6 +556,9 @@
     ok(!spoken.some(function (s) { return (s.lang || "").indexOf("en") === 0 && /[㐀-鿿]/.test(s.text); }), "英文語音段落裡沒有夾中文字");
     var zhWithPwa = spoken.filter(function (s) { return /PWA/.test(s.text) && (s.lang || "").indexOf("zh") === 0; });
     ok(zhWithPwa.length >= 1, "夾在中文句中的短英文詞留給中文語音");
+    ok(en.every(function (s) { return s.rate === 0.85; }), "英文語音用英文語速（預設 0.85）", en.map(function (s) { return s.rate; }).join(","));
+    ok(spoken.filter(function (s) { return (s.lang || "").indexOf("zh") === 0; }).every(function (s) { return s.rate === 1; }), "中文語音用中文語速（預設 1）");
+    ok(win.document.getElementById("rate-en-range").value === "0.85", "設定面板顯示英文語速滑桿");
 
     /* 停止 */
     var doc = win.document;
