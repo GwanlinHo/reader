@@ -39,8 +39,8 @@
   /* 朗讀停頓（毫秒）。標點送 TTS 前已清掉，停頓全靠佇列插入。
      iOS 每段語音本身還有啟動延遲，實際聽到的會比這裡長一點，所以逗號那級刻意設短。 */
   var CLAUSE_PAUSE = 150;    /* 逗號、頓號、分號、冒號 */
-  var SENT_PAUSE = 350;      /* 句號、問號、驚嘆號 */
-  var BLOCK_PAUSE = 500;     /* 段落之間 */
+  var SENT_PAUSE = 150;      /* 句號、問號、驚嘆號 */
+  var BLOCK_PAUSE = 250;     /* 段落之間 */
   var MANUAL_SCROLL_HOLD = 5000;   /* 手動捲動後暫停自動捲動的時間 */
 
   var settings = {
